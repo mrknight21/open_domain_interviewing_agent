@@ -173,7 +173,7 @@ class ExampleModel(tga.TorchGeneratorModel):
         return h[:, indices, :], c[:, indices, :]
 
 
-class Seq2seqAgent(tga.TorchGeneratorAgent):
+class IntervieweeAgent(tga.TorchGeneratorAgent):
     """
     Example agent.
 
@@ -188,7 +188,7 @@ class Seq2seqAgent(tga.TorchGeneratorAgent):
         Add CLI arguments.
         """
         # Make sure to add all of TorchGeneratorAgent's arguments
-        super(Seq2seqAgent, cls).add_cmdline_args(argparser)
+        super(IntervieweeAgent, cls).add_cmdline_args(argparser)
 
         # Add custom arguments only for this model.
         group = argparser.add_argument_group('Example TGA Agent')
