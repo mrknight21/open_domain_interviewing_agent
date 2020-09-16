@@ -173,7 +173,7 @@ class ExampleModel(tga.TorchGeneratorModel):
         return h[:, indices, :], c[:, indices, :]
 
 
-class Seq2seqAgent(tga.TorchGeneratorAgent):
+class IntervieweeAgent(tga.TorchGeneratorAgent):
     """
     Example agent.
 
