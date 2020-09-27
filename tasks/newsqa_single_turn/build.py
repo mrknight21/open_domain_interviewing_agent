@@ -29,7 +29,7 @@ def _parse_answers(story, tokens_range_str):
         start_end_ind = each.split(':')
         start_ind, end_ind = start_end_ind[0], start_end_ind[1]
         starts.append(str(start_ind))
-        text = tokenized_story[eval(each)].join(' ')
+        text = tokenized_story[int(start_ind):int(end_ind)].join(' ')
         labels.append(text.replace('|', ' __PIPE__ '))
     return '|'.join(starts), '|'.join(labels)
 
