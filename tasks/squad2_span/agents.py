@@ -3,7 +3,7 @@ from parlai.tasks.squad2.agents import IndexTeacher
 
 import copy
 
-
+NO_ANSWER_REPLY = "I don't know"
 
 class DefaultTeacher(IndexTeacher):
 
@@ -35,12 +35,15 @@ class DefaultTeacher(IndexTeacher):
 
         action = {
             'id': 'squad',
-            'text': context + '\n' + question,
+            'text': context + ' [SEP] ' + question,
+            'context': context,
+            'question': question,
             'labels': answers,
             'plausible_answers': plausible,
             'episode_done': True,
             'answer_starts': answer_starts,
-            'answer_ends': answer_ends
+            'answer_ends': answer_ends,
+            'is_impossible': qa['is_impossible']
         }
         return action
 
