@@ -12,38 +12,76 @@ class DefaultTeacher(IndexTeacher):
         super().__init__(opt, shared)
 
 
-    def get(self, episode_idx, entry_idx=None):
+    def get(self, episode_idx, entry_idx=None, is_training=True):
         article_idx, paragraph_idx, qa_idx = self.examples[episode_idx]
         article = self.squad[article_idx]
         paragraph = article['paragraphs'][paragraph_idx]
-        qa = paragraph['qas'][qa_idx]
-        question = qa['question']
-        answers = []
-        answer_starts = []
-        answer_ends = []
-        context = paragraph['context']
-        if not qa['is_impossible']:
-            for a in qa['answers']:
-                answers.append(a['text'])
-                start_idx, end_idx = self.get_start_end_idx(a['text'], a['answer_start'], context)
-                answer_starts.append(start_idx)
-                answer_ends.append(end_idx)
-        else:
-            answers = [self.opt['impossible_answer_string']]
+        paragraph_text = paragraph["context"]
+        doc_tokens = []
+        char_to_word_offset = []
+        prev_is_whitespace = True
+        for c in paragraph_text:
+            if self.is_whitespace(c):
+                prev_is_whitespace = True
+            else:
+                if prev_is_whitespace:
+                    doc_tokens.append(c)
+                else:
+                    doc_tokens[-1] += c
+                prev_is_whitespace = False
+            char_to_word_offset.append(len(doc_tokens) - 1)
 
-        plausible = qa.get("plausible_answers", [])
+        qa = paragraph["qas"][qa_idx]
+        qas_id = qa["id"]
+        question_text = qa["question"]
+        start_position = None
+        end_position = None
+        orig_answer_text = None
+        is_impossible = False
+        if is_training:
+            is_impossible = qa["is_impossible"]
+            if (len(qa["answers"]) != 1) and (not is_impossible):
+                raise ValueError(
+                    "For training, each question should have exactly 1 answer.")
+            if not is_impossible:
+                answer = qa["answers"][0]
+                orig_answer_text = answer["text"]
+                answer_offset = answer["answer_start"]
+                answer_length = len(orig_answer_text)
+                start_position = char_to_word_offset[answer_offset]
+                end_position = char_to_word_offset[answer_offset + answer_length -
+                                                   1]
+                # Only add answers where the text can be exactly recovered from the
+                # document. If this CAN'T happen it's likely due to weird Unicode
+                # stuff so we will just skip the example.
+                #
+                # Note that this means for training mode, every example is NOT
+                # guaranteed to be preserved.
+                actual_text = " ".join(
+                    doc_tokens[start_position:(end_position + 1)])
+                cleaned_answer_text = " ".join(
+                    self.whitespace_tokenize(orig_answer_text))
+                if actual_text.find(cleaned_answer_text) == -1:
+                    print("Could not find answer: '%s' vs. '%s'",
+                                       actual_text, cleaned_answer_text)
+                    return None
+            else:
+                start_position = -1
+                end_position = -1
+                orig_answer_text = ""
 
         action = {
             'id': 'squad',
-            'text': context + ' [SEP] ' + question,
-            'context': context,
-            'question': question,
-            'labels': answers,
-            'plausible_answers': plausible,
+            'qas_id': qas_id,
+            'text': paragraph_text + ' [SEP] ' + question_text,
+            'doc_tokens': doc_tokens,
+            'context': paragraph_text,
+            'question_text': question_text,
+            'labels': orig_answer_text,
             'episode_done': True,
-            'answer_starts': answer_starts,
-            'answer_ends': answer_ends,
-            'is_impossible': qa['is_impossible']
+            'start_position': start_position,
+            'end_position': end_position,
+            'is_impossible': is_impossible
         }
         return action
 
@@ -59,3 +97,16 @@ class DefaultTeacher(IndexTeacher):
             start_idx = start_idx - 2
             end_idx = end_idx - 2  # When the gold label is off by two characters
         return start_idx, end_idx
+
+    def is_whitespace(self, c):
+        if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
+          return True
+        return False
+
+    def whitespace_tokenize(self, text):
+        """Runs basic whitespace cleaning and splitting on a piece of text."""
+        text = text.strip()
+        if not text:
+            return []
+        tokens = text.split()
+        return tokens

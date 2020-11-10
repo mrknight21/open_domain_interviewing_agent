@@ -193,10 +193,10 @@ class BertExtractiveAgent(TorchSpanAgent):
         """
         Override to pass in text lengths.
         """
-        return (self.di)
+        return (batch.encoding)
 
     def _encoder_input(self, batch):
-        return (batch.text_vec,)
+        return (batch.text_vec)
 
     def _pad_tensor(self, items):
         """

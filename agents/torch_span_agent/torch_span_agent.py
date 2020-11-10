@@ -4,13 +4,14 @@ Torch Classifier Agents extract answer text from the context by prediction the s
 
 from abc import ABC, abstractmethod
 from parlai.core.opt import Opt
-from parlai.core.torch_agent import TorchAgent, Output, Optional, History
+from parlai.core.torch_agent import TorchAgent, Output, Optional, History, Batch
 import parlai.utils.logging as logging
-from parlai.utils.torch import PipelineHelper, total_parameters, trainable_parameters
+from parlai.utils.torch import PipelineHelper, total_parameters, trainable_parameters, padded_tensor
 from parlai.utils.fp16 import FP16SafeCrossEntropy
 from parlai.core.metrics import AverageMetric
 from parlai.core.message import Message
 from collections import deque
+import collections
 
 import torch
 import torch.nn as nn
@@ -20,6 +21,8 @@ def is_whitespace(c):
     if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
         return True
     return False
+
+
 
 class DialogueHistory(History):
     def __init__(self, opt, **kwargs):
@@ -50,7 +53,7 @@ class DialogueHistory(History):
         """
         if not self.context:
             self.context = obs['context']
-        text = obs['question']
+        text = obs['question_text']
         self._update_raw_strings(text)
         if self.add_person_tokens:
             text = self._add_person_tokens(
@@ -101,14 +104,20 @@ class TorchExtractiveModel(nn.Module, ABC):
         super().__init__()
         self.num_labels = 2
 
-    def forward(self, inputs, ys=None):
+    def forward(self,
+        inputs,
+        output_attentions=None,
+        output_hidden_states=None,
+        ):
         """
 
         """
-        assert ys is not None, "Greedy decoding in TGModel.forward no longer supported."
-        outputs = self.encoder(
+        outputs = self.encoder.transformer(
             **inputs,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
         )
+
         sequence_output = outputs[0]
         logits = self.qa_outputs(sequence_output)
         start_logits, end_logits = logits.split(1, dim=-1)
@@ -152,7 +161,7 @@ class TorchSpanAgent(TorchAgent):
             '--history-maximum-length',
             type=int,
             default=63,
-            help='maximum number of tokens allowed for quenry string',
+            help='maximum number of tokens allowed for history string',
         )
         # query maximum length
         parser.add_argument(
@@ -166,7 +175,14 @@ class TorchSpanAgent(TorchAgent):
             '--context-maximum-length',
             type=int,
             default=385,
-            help='maximum number of tokens allowed for quenry string',
+            help='maximum number of tokens allowed for context string',
+        )
+        # context maximum length
+        parser.add_argument(
+            '--doc_stride',
+            type=int,
+            default=128,
+            help='When splitting up a long document into chunks, how much stride to take between chunks.',
         )
 
     @classmethod
@@ -187,6 +203,7 @@ class TorchSpanAgent(TorchAgent):
         self.context_truncate = opt['context_maximum_length']
         self.history_truncate = opt['history_maximum_length']
         self.truncate = self.dict.tokenizer.max_len
+        self.doc_stride = opt['doc_stride']
 
         if shared:
             self.model = shared['model']
@@ -246,24 +263,46 @@ class TorchSpanAgent(TorchAgent):
                 """
         if batch.label_vec is None:
             raise ValueError('Cannot compute loss without a label.')
-        model_output = self.model(*self._model_input(batch), ys=batch.label_vec)
-        scores, preds, *_ = model_output
-        score_view = scores.view(-1, scores.size(-1))
-        loss = self.criterion(score_view, batch.label_vec.view(-1))
-        loss = loss.view(scores.shape[:-1]).sum(dim=1)
-        # save loss to metrics
-        notnull = batch.label_vec.ne(self.NULL_IDX)
-        target_tokens = notnull.long().sum(dim=-1)
-        correct = ((batch.label_vec == preds) * notnull).sum(dim=-1)
-
-        self.record_local_metric('loss', AverageMetric.many(loss, target_tokens))
-        # actually do backwards loss
-        loss = loss.sum()
-        loss /= target_tokens.sum()  # average loss per token
+        start_logits, end_logits, sequence_output = self.model(self._model_input(batch))
+        start_positions = batch.get('start_positions', None)
+        end_positions = batch.get('end_positions', None)
+        output_start_positions, output_end_positions = (torch.argmax(start_logits, dim=1).unsqueeze(0), torch.argmax(end_logits, dim=1).unsqueeze(0))
+        end_start_pairs = torch.cat((output_start_positions, output_end_positions), 1).cpu().data.numpy()
+        output_text = []
+        output_ids = []
+        for i in range(end_start_pairs.shape[0]):
+            pair = end_start_pairs[i]
+            if pair[0] <= pair[1]:
+                output_id = batch.encoding['input_ids'][i][pair[0]: pair[1]+1]
+                text = self.dict.tokenizer.decode(output_id)
+                output_text.append(text)
+                output_ids.append(output_id)
+            else:
+                output_text.append("")
+        model_output = {"output_start_positions": output_start_positions, "output_end_positions": output_end_positions, "span_text": output_text}
+        total_loss = None
+        if batch.get('start_positions', None) is not None:
+            # If we are on multi-GPU, split add a dimension
+            #
+            if len(start_positions.size()) > 1:
+                start_positions = start_positions.squeeze(-1)
+            if len(end_positions.size()) > 1:
+                end_positions = end_positions.squeeze(-1)
+            # # sometimes the start/end positions are outside our model inputs, we ignore these terms
+            ignored_index = start_logits.size(1)
+            start_positions.clamp_(0, ignored_index)
+            end_positions.clamp_(0, ignored_index)
+            #
+            start_loss = self.criterion(start_logits, start_positions)
+            end_loss = self.criterion(end_logits, end_positions)
+            total_loss = (start_loss + end_loss) / 2
+        self.record_local_metric('total_loss', AverageMetric.many(total_loss, [len(batch.observations)]))
+        self.record_local_metric('start_loss', AverageMetric.many(start_loss, [len(batch.observations)]))
+        self.record_local_metric('end_loss', AverageMetric.many(end_loss, [len(batch.observations)]))
         if return_output:
-            return (loss, model_output)
+            return (total_loss, model_output)
         else:
-            return loss
+            return total_loss
 
     def build_criterion(self):
         """
@@ -303,15 +342,16 @@ class TorchSpanAgent(TorchAgent):
         # helps with memory usage
         # note we want to use the opt's batchsize instead of the observed batch size
         # in case dynamic batching is in use
-        self._init_cuda_buffer(self.opt['batchsize'], self.label_truncate or 256)
+        # self._init_cuda_buffer(self.opt['batchsize'], self.label_truncate or 256)
         self.model.train()
         self.zero_grad()
 
         try:
-            loss = self.compute_loss(batch)
+            loss, model_output = self.compute_loss(batch, return_output=True)
             self.backward(loss)
             self.update_params()
             oom_sync = False
+            # return Output(**model_output)
         except RuntimeError as e:
             # catch out of memory exceptions during fwd/bck (skip batch)
             if 'out of memory' in str(e):
@@ -351,49 +391,273 @@ class TorchSpanAgent(TorchAgent):
         Useful to override to change vectorization behavior
         """
         # convert 'labels' or 'eval_labels' into vectors
+        obs['label_vec'] = [obs['text_vec'][i][start: end+1]
+                            for i, (start, end) in enumerate(zip(obs['answer_starts'], obs['answer_ends']))]
         return obs
 
     # Tokenize our training dataset
-    def _set_text_vec(self, obs, history, truncate):
+    def _set_text_vec(self, obs, history, truncate, is_training=True):
         # Tokenize contexts and questions (as pairs of inputs)
-        context_text = self.truncate_with_dic(obs['context'], self.context_truncate)
-        history_text = self.truncate_with_dic(" ".join(history.history_strings[-2:]), self.history_truncate)
-        question_text = self.truncate_with_dic(obs['question'], self.query_truncate)
-        input_triplet = [question_text, context_text, history_text]
-        encodings = self.dict.tokenizer.encode_plus(input_triplet, pad_to_max_length=True, max_length=512)
-        context_encodings = self.dict.tokenizer.encode_plus(obs['context'])
+        text_vecs = []
+        full_text_vecs = []
+        start_positions = []
+        end_positions = []
+        ans_text = obs['labels']
+        history_text = self.truncate_with_dic(" ".join(history.history_strings[:-1]), self.history_truncate, latest=True)
+        question_text = self.truncate_with_dic(obs['question_text'], self.query_truncate)
+        query_tokens = self.dict.tokenizer.tokenize(question_text)
 
-        # Compute start and end tokens for labels using Transformers's fast tokenizers alignement methodes.
-        # this will give us the position of answer span in the context text
-        start_idx, end_idx = obs['answer_starts'], obs['answers_ends']
-        start_positions_context = context_encodings.char_to_token(start_idx)
-        end_positions_context = context_encodings.char_to_token(end_idx - 1)
+        tok_to_orig_index = []
+        orig_to_tok_index = []
+        all_doc_tokens = []
+        for (i, token) in enumerate(obs['doc_tokens']):
+            orig_to_tok_index.append(len(all_doc_tokens))
+            sub_tokens = self.dict.tokenizer.tokenize(token)
+            for sub_token in sub_tokens:
+                tok_to_orig_index.append(i)
+                all_doc_tokens.append(sub_token)
 
-        # here we will compute the start and end position of the answer in the whole example
-        # as the example is encoded like this <s> question</s></s> context</s>
-        # and we know the postion of the answer in the context
-        # we can just find out the index of the sep token and then add that to position + 1 (+1 because there are two sep tokens)
-        # this will give us the position of the answer span in whole example
-        sep_idx = encodings['input_ids'].index(self.dict.tokenizer.sep_token_id)
-        start_positions = start_positions_context + sep_idx + 1
-        end_positions = end_positions_context + sep_idx + 1
+        tok_start_position = None
+        tok_end_position = None
+        if is_training and obs['is_impossible']:
+            tok_start_position = -1
+            tok_end_position = -1
+        if is_training and not obs['is_impossible']:
+            tok_start_position = orig_to_tok_index[obs['start_position']]
+            if obs['end_position'] < len(obs['doc_tokens']) - 1:
+                tok_end_position = orig_to_tok_index[obs['end_position'] + 1] - 1
+            else:
+                tok_end_position = len(all_doc_tokens) - 1
+            (tok_start_position, tok_end_position) = self.improve_answer_span(
+                all_doc_tokens, tok_start_position, tok_end_position, self.dict.tokenizer,
+                ans_text)
 
-        if end_positions > 512:
-            start_positions, end_positions = 0, 0
-        obs['text_vec'] = encodings['input_ids']
-        obs['full_text_vec'] = encodings
+        # The -3 accounts for [CLS], [SEP] and [SEP] and [SEP]
+        max_tokens_for_doc = self.truncate - len(query_tokens) - self.history_truncate - 4
+
+        # We can have documents that are longer than the maximum sequence length.
+        # To deal with this we do a sliding window approach, where we take chunks
+        # of the up to our max length with a stride of `doc_stride`.
+        _DocSpan = collections.namedtuple(  # pylint: disable=invalid-name
+            "DocSpan", ["start", "length"])
+        doc_spans = []
+        start_offset = 0
+        while start_offset < len(all_doc_tokens):
+            length = len(all_doc_tokens) - start_offset
+            if length > max_tokens_for_doc:
+                length = max_tokens_for_doc
+            doc_spans.append(_DocSpan(start=start_offset, length=length))
+            if start_offset + length == len(all_doc_tokens):
+                break
+            start_offset += min(length, self.doc_stride)
+
+        for (doc_span_index, doc_span) in enumerate(doc_spans):
+            # context_tokens = all_doc_tokens[doc_span[0]:doc_span[1]]
+            context_text = self.slice_text_with_token_index(obs['context'], doc_span[0], doc_span[1])
+            if history_text:
+                context_text = context_text + " " + history_text
+            input_triplet = [question_text, context_text]
+            encodings = self.dict.tokenizer.encode_plus(*input_triplet,
+                                                        pad_to_max_length=True,
+                                                        add_special_tokens=True,
+                                                        padding=True,
+                                                        max_length=self.truncate,
+                                                        return_attention_mask=True,
+                                                        truncation=True,
+                                                        return_tensors='pt')
+            start_position = None
+            end_position = None
+            if is_training and not obs['is_impossible']:
+                # For training, if our document chunk does not contain an annotation
+                # we throw it out, since there is nothing to predict.
+                doc_start = doc_span.start
+                doc_end = doc_span.start + doc_span.length - 1
+                out_of_span = False
+                if not (tok_start_position >= doc_start and
+                        tok_end_position <= doc_end):
+                    out_of_span = True
+                if out_of_span:
+                    start_position = 0
+                    end_position = 0
+                else:
+                    doc_offset = len(query_tokens) + 2
+                    start_position = tok_start_position - doc_start + doc_offset
+                    end_position = tok_end_position - doc_start + doc_offset
+
+            if is_training and obs['is_impossible']:
+                start_position = 0
+                end_position = 0
+
+            text_vecs.extend(encodings['input_ids'])
+            full_text_vecs.append(encodings)
+            start_positions.append(start_position)
+            end_positions.append(end_position)
+
+        obs['text_vec'] = text_vecs
+        obs['full_text_vec'] = full_text_vecs
         obs['answer_starts'] = start_positions
-        obs['answers_ends'] = end_positions
+        obs['answer_ends'] = end_positions
         return obs
 
-    def truncate_with_dic(self, text, truncate):
-        ids = self.dict.txt2vec(text)
-        if len(ids) <= truncate:
-            return text
+    def batchify(self, obs_batch, sort=False):
+
+        if len(obs_batch) == 0:
+            return Batch(batchsize=0)
+
+        valid_obs = [(i, ex) for i, ex in enumerate(obs_batch) if self.is_valid(ex)]
+
+        if len(valid_obs) == 0:
+            return Batch(batchsize=0)
+
+        valid_inds, exs = zip(*valid_obs)
+        encodings = [text_vec for text_vec in obs_batch[0]['full_text_vec']]
+        input_ids = []
+        token_type_ids = []
+        attention_mask = []
+        for i, encoding in enumerate(encodings):
+            input_ids.append(encoding['input_ids'])
+            token_type_ids.append(encoding['token_type_ids'])
+            attention_mask.append(encoding['attention_mask'])
+        input_ids = torch.cat(input_ids)
+        token_type_ids = torch.cat(token_type_ids)
+        attention_mask = torch.cat(attention_mask)
+        xs, x_lens = self._pad_tensor([text_vec for batch in obs_batch for text_vec in batch['text_vec']])
+        start_positions = torch.LongTensor([batch['answer_starts'] for batch in obs_batch])
+        end_positions = torch.LongTensor([batch['answer_ends'] for batch in obs_batch])
+        labels = [batch['labels'] for batch in obs_batch]
+        label_vec, label_vec_len = self._pad_tensor([vec for batch in obs_batch for vec in batch['label_vec']])
+        ys, y_lens = start_positions, len(start_positions)
+        if self.use_cuda:
+            start_positions = start_positions.cuda()
+            end_positions = end_positions.cuda()
+            input_ids = input_ids.cuda()
+            token_type_ids = token_type_ids.cuda()
+            attention_mask = attention_mask.cuda()
+
+        batch_encoding = {'input_ids': input_ids, 'token_type_ids': token_type_ids, 'attention_mask': attention_mask}
+
+        return Batch(
+            batchsize=len(valid_inds),
+            encoding=batch_encoding,
+            text_vec=xs,
+            text_lengths=x_lens,
+            label_vec=label_vec,
+            label_lengths=y_lens,
+            labels_text=labels,
+            valid_indices=valid_inds,
+            observations=exs,
+            start_positions=start_positions,
+            end_positions=end_positions
+        )
+
+    def _dummy_batch(self, batchsize, maxlen):
+        """
+        Create a dummy batch.
+
+        This is used to preinitialize the cuda buffer, or otherwise force a
+        null backward pass after an OOM.
+
+        If your model uses additional inputs beyond text_vec and label_vec,
+        you will need to override it to add additional fields.
+        """
+        text_vec = (
+            torch.arange(1, maxlen + 1)  # need it as long as specified
+            .clamp(max=3)  # cap at 3 for testing with tiny dictionaries
+            .unsqueeze(0)
+            .expand(batchsize, maxlen)
+            .cuda()
+        )
+        # label vec has two tokens to make it interesting, but we we can't use the
+        # start token, it's reserved.
+        label_vec = (
+            torch.LongTensor([self.END_IDX, self.NULL_IDX])
+            .unsqueeze(0)
+            .expand(batchsize, 2)
+            .cuda()
+        )
+        return Batch(
+            text_vec=text_vec, label_vec=label_vec, text_lengths=[maxlen] * batchsize
+        )
+
+    def _init_cuda_buffer(self, batchsize, maxlen, force=False):
+        """
+        Pre-initialize CUDA buffer by doing fake forward pass.
+
+        This is also used in distributed mode to force a worker to sync with others.
+        """
+        if self.use_cuda and (force or not hasattr(self, 'buffer_initialized')):
+            try:
+                self._control_local_metrics(disabled=True)
+                loss = 0 * self.compute_loss(self._dummy_batch(batchsize, maxlen))
+                self._control_local_metrics(enabled=True)
+                self._temporarily_disable_local_metrics = False
+                self.backward(loss)
+                self.buffer_initialized = True
+            except RuntimeError as e:
+                if 'out of memory' in str(e):
+                    m = (
+                        'CUDA OOM: Lower batch size (-bs) from {} or lower '
+                        ' max sequence length (-tr) from {}'
+                        ''.format(batchsize, maxlen)
+                    )
+                    raise RuntimeError(m)
+                else:
+                    raise e
+
+    def _pad_tensor(self, items):
+        """
+        Override to always set fp16friendly to False.
+        """
+        return padded_tensor(
+            items, pad_idx=self.NULL_IDX, use_cuda=self.use_cuda, fp16friendly=False
+        )
+
+    def piece_word_char_to_token(self, tokens, start_index, answer):
+        token_start_index = []
+        for index, ans in zip(start_index, answer):
+            char_index = 0
+            for token in tokens:
+                subword = False
+                if '##' in token:
+                    subword = True
+                    word = token.replace('##', '')
+
+    def truncate_with_dic(self, text, truncate, latest=False):
+        if not text:
+            return ""
+        tokens = text.split(" ")
+        if latest:
+            tokens = tokens.reverse()
+        tokens_in_range = []
+        tokens_count = 0
+        for (i, token) in enumerate(tokens):
+            if tokens_count > truncate:
+                break
+            tokens_in_range.append(token)
+            sub_tokens = self.dict.tokenizer.tokenize(token)
+            for sub_token in sub_tokens:
+                tokens_count += 1
+        if latest:
+            tokens_in_range = tokens_in_range.reverse()
+        return " ".join(tokens_in_range)
+
+    def slice_text_with_token_index(self, text, start, end):
+        if not text:
+            return ""
+        tokens = text.split(" ")
+        tokens_in_range = []
+        subwords_count = 0
+        for (i, token) in enumerate(tokens):
+            if subwords_count > end:
+                break
+            elif subwords_count >= start:
+                tokens_in_range.append(token)
+            sub_tokens = self.dict.tokenizer.tokenize(token)
+            subwords_count += len(sub_tokens)
+        if tokens_in_range:
+            return " ".join(tokens_in_range)
         else:
-            ids = ids[:truncate]
-            truncate_text = self.dict.tokenizer.decode(ids)
-            return truncate_text
+            return ""
 
     def get_char_to_word_offset(self, text):
         doc_tokens = []
@@ -410,3 +674,51 @@ class TorchSpanAgent(TorchAgent):
                 prev_is_whitespace = False
             char_to_word_offset.append(len(doc_tokens) - 1)
         return char_to_word_offset
+
+    def improve_answer_span(self, doc_tokens, input_start, input_end, tokenizer,
+                             orig_answer_text):
+        tok_answer_text = " ".join(tokenizer.tokenize(orig_answer_text))
+
+        for new_start in range(input_start, input_end + 1):
+            for new_end in range(input_end, new_start - 1, -1):
+                text_span = " ".join(doc_tokens[new_start:(new_end + 1)])
+                if text_span == tok_answer_text:
+                    return (new_start, new_end)
+
+        return (input_start, input_end)
+
+    def _check_is_max_context(self, doc_spans, cur_span_index, position):
+        """Check if this is the 'max context' doc span for the token."""
+
+        # Because of the sliding window approach taken to scoring documents, a single
+        # token can appear in multiple documents. E.g.
+        #  Doc: the man went to the store and bought a gallon of milk
+        #  Span A: the man went to the
+        #  Span B: to the store and bought
+        #  Span C: and bought a gallon of
+        #  ...
+        #
+        # Now the word 'bought' will have two scores from spans B and C. We only
+        # want to consider the score with "maximum context", which we define as
+        # the *minimum* of its left and right context (the *sum* of left and
+        # right context will always be the same, of course).
+        #
+        # In the example the maximum context for 'bought' would be span C since
+        # it has 1 left context and 3 right context, while span B has 4 left context
+        # and 0 right context.
+        best_score = None
+        best_span_index = None
+        for (span_index, doc_span) in enumerate(doc_spans):
+            end = doc_span.start + doc_span.length - 1
+            if position < doc_span.start:
+                continue
+            if position > end:
+                continue
+            num_left_context = position - doc_span.start
+            num_right_context = end - position
+            score = min(num_left_context, num_right_context) + 0.01 * doc_span.length
+            if best_score is None or score > best_score:
+                best_score = score
+                best_span_index = span_index
+
+        return cur_span_index == best_span_index
