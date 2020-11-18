@@ -266,8 +266,8 @@ class TorchSpanAgent(TorchAgent):
         start_logits, end_logits, sequence_output = self.model(self._model_input(batch))
         start_positions = batch.get('start_positions', None)
         end_positions = batch.get('end_positions', None)
-        output_start_positions, output_end_positions = (torch.argmax(start_logits, dim=1).unsqueeze(0), torch.argmax(end_logits, dim=1).unsqueeze(0))
-        end_start_pairs = torch.cat((output_start_positions, output_end_positions), 1).cpu().data.numpy()
+        output_start_positions, output_end_positions = torch.argmax(start_logits, dim=1), torch.argmax(end_logits, dim=1)
+        end_start_pairs = torch.stack((output_start_positions, output_end_positions), dim=1).cpu().data.numpy()
         output_text = []
         output_ids = []
         for i in range(end_start_pairs.shape[0]):
@@ -281,6 +281,10 @@ class TorchSpanAgent(TorchAgent):
                 output_text.append("")
         model_output = {"output_start_positions": output_start_positions, "output_end_positions": output_end_positions, "span_text": output_text}
         total_loss = None
+        losses = []
+        start_losses = []
+        end_losses = []
+        correct_span_nums = []
         if batch.get('start_positions', None) is not None:
             # If we are on multi-GPU, split add a dimension
             #
@@ -292,13 +296,30 @@ class TorchSpanAgent(TorchAgent):
             ignored_index = start_logits.size(1)
             start_positions.clamp_(0, ignored_index)
             end_positions.clamp_(0, ignored_index)
-            #
-            start_loss = self.criterion(start_logits, start_positions)
-            end_loss = self.criterion(end_logits, end_positions)
-            total_loss = (start_loss + end_loss) / 2
-        self.record_local_metric('total_loss', AverageMetric.many(total_loss, [len(batch.observations)]))
-        self.record_local_metric('start_loss', AverageMetric.many(start_loss, [len(batch.observations)]))
-        self.record_local_metric('end_loss', AverageMetric.many(end_loss, [len(batch.observations)]))
+            for doc_indexes in batch['batch_indexes_map']:
+                cur_loss = 0
+                index_start, index_end = doc_indexes[0], doc_indexes[-1]+1
+                cur_start_logits = start_logits[index_start: index_end]
+                cur_end_logits = end_logits[index_start: index_end]
+                start_loss = self.criterion(cur_start_logits, torch.flatten(start_positions[index_start: index_end])).mean()
+                end_loss = self.criterion(cur_end_logits, torch.flatten(end_positions[index_start: index_end])).mean()
+                cur_loss = (start_loss + end_loss) / 2
+                start_corrects = output_start_positions[index_start: index_end] == start_positions[index_start: index_end]
+                end_corrects = output_end_positions[index_start: index_end] == end_positions[index_start: index_end]
+                correct_span_num = start_corrects * end_corrects
+                correct_span_num = correct_span_num.sum()
+                losses.append(cur_loss)
+                start_losses.append(start_loss)
+                end_losses.append(end_loss)
+                correct_span_nums.append(correct_span_num)
+            batches_count = [1]*len(batch['batch_indexes_map'])
+            doc_count = [len(doc_indexes) for doc_indexes in batch['batch_indexes_map']]
+            self.record_local_metric('total_loss', AverageMetric.many(losses, batches_count))
+            self.record_local_metric('start_loss', AverageMetric.many(start_losses, batches_count))
+            self.record_local_metric('end_loss', AverageMetric.many(end_losses, batches_count))
+            self.record_local_metric('span_acc', AverageMetric.many(correct_span_nums, doc_count))
+
+        total_loss = torch.stack(losses).mean()
         if return_output:
             return (total_loss, model_output)
         else:
@@ -451,20 +472,18 @@ class TorchSpanAgent(TorchAgent):
                 break
             start_offset += min(length, self.doc_stride)
 
+        question_texts = []
+        context_texts = []
+        text_vecs = []
+
+        if len(doc_spans) > 1:
+            logging.info('Chuncking document with {} tokens shift'.format(self.doc_stride))
         for (doc_span_index, doc_span) in enumerate(doc_spans):
             # context_tokens = all_doc_tokens[doc_span[0]:doc_span[1]]
             context_text = self.slice_text_with_token_index(obs['context'], doc_span[0], doc_span[1])
             if history_text:
                 context_text = context_text + " " + history_text
-            input_triplet = [question_text, context_text]
-            encodings = self.dict.tokenizer.encode_plus(*input_triplet,
-                                                        pad_to_max_length=True,
-                                                        add_special_tokens=True,
-                                                        padding=True,
-                                                        max_length=self.truncate,
-                                                        return_attention_mask=True,
-                                                        truncation=True,
-                                                        return_tensors='pt')
+
             start_position = None
             end_position = None
             if is_training and not obs['is_impossible']:
@@ -487,14 +506,24 @@ class TorchSpanAgent(TorchAgent):
             if is_training and obs['is_impossible']:
                 start_position = 0
                 end_position = 0
-
-            text_vecs.extend(encodings['input_ids'])
-            full_text_vecs.append(encodings)
+            text_vec = self.dict.tokenizer.encode_plus(question_text, context_text,
+                                                        pad_to_max_length=True,
+                                                        add_special_tokens=True,
+                                                        padding=True,
+                                                        max_length=self.truncate,
+                                                        return_attention_mask=True,
+                                                        truncation=True,
+                                                        return_tensors='pt')['input_ids'][0]
+            text_vecs.append(text_vec)
+            question_texts.append(question_text)
+            context_texts.append(context_text)
             start_positions.append(start_position)
             end_positions.append(end_position)
 
+        full_text_dict ={'question_texts': question_texts, 'context_texts': context_texts}
+
         obs['text_vec'] = text_vecs
-        obs['full_text_vec'] = full_text_vecs
+        obs['full_text_dict'] = full_text_dict
         obs['answer_starts'] = start_positions
         obs['answer_ends'] = end_positions
         return obs
@@ -508,101 +537,62 @@ class TorchSpanAgent(TorchAgent):
 
         if len(valid_obs) == 0:
             return Batch(batchsize=0)
-
         valid_inds, exs = zip(*valid_obs)
-        encodings = [text_vec for text_vec in obs_batch[0]['full_text_vec']]
-        input_ids = []
-        token_type_ids = []
-        attention_mask = []
-        for i, encoding in enumerate(encodings):
-            input_ids.append(encoding['input_ids'])
-            token_type_ids.append(encoding['token_type_ids'])
-            attention_mask.append(encoding['attention_mask'])
-        input_ids = torch.cat(input_ids)
-        token_type_ids = torch.cat(token_type_ids)
-        attention_mask = torch.cat(attention_mask)
-        xs, x_lens = self._pad_tensor([text_vec for batch in obs_batch for text_vec in batch['text_vec']])
-        start_positions = torch.LongTensor([batch['answer_starts'] for batch in obs_batch])
-        end_positions = torch.LongTensor([batch['answer_ends'] for batch in obs_batch])
-        labels = [batch['labels'] for batch in obs_batch]
-        label_vec, label_vec_len = self._pad_tensor([vec for batch in obs_batch for vec in batch['label_vec']])
-        ys, y_lens = start_positions, len(start_positions)
+        batch_indexes_map = []
+        start_positions = []
+        end_positions = []
+        question_texts = []
+        context_texts = []
+        labels = []
+        label_vec = []
+        cur_index = 0
+        for i in valid_inds:
+            batch = obs_batch[i]
+            doc_indexes = []
+            start_positions.extend(batch['answer_starts'])
+            end_positions.extend(batch['answer_ends'])
+            labels.append(batch['labels'])
+            label_vec.extend(batch['label_vec'])
+            question_texts.extend(batch['full_text_dict']['question_texts'])
+            context_texts.extend(batch['full_text_dict']['context_texts'])
+            doc_num = len(batch['answer_starts'])
+            for _ in range(doc_num):
+                doc_indexes.append(cur_index)
+                cur_index += 1
+            batch_indexes_map.append(doc_indexes)
+
+        encodings = self.dict.tokenizer(question_texts, context_texts,
+                                        pad_to_max_length=True,
+                                        add_special_tokens=True,
+                                        padding=True,
+                                        max_length=self.truncate,
+                                        return_attention_mask=True,
+                                        truncation=True,
+                                        return_tensors='pt')
+        start_positions = torch.LongTensor(start_positions)
+        end_positions = torch.LongTensor(end_positions)
+        # xs, x_lens = self._pad_tensor(xs)
+        # label_vec, label_vec_len = self._pad_tensor(label_vec)
+        # ys, y_lens = start_positions, len(start_positions)
+
         if self.use_cuda:
             start_positions = start_positions.cuda()
             end_positions = end_positions.cuda()
-            input_ids = input_ids.cuda()
-            token_type_ids = token_type_ids.cuda()
-            attention_mask = attention_mask.cuda()
-
-        batch_encoding = {'input_ids': input_ids, 'token_type_ids': token_type_ids, 'attention_mask': attention_mask}
+            encodings['input_ids'] = encodings['input_ids'].cuda()
+            encodings['token_type_ids'] = encodings['token_type_ids'].cuda()
+            encodings['attention_mask'] = encodings['attention_mask'].cuda()
 
         return Batch(
             batchsize=len(valid_inds),
-            encoding=batch_encoding,
-            text_vec=xs,
-            text_lengths=x_lens,
+            encoding=encodings,
             label_vec=label_vec,
-            label_lengths=y_lens,
             labels_text=labels,
             valid_indices=valid_inds,
             observations=exs,
             start_positions=start_positions,
-            end_positions=end_positions
+            end_positions=end_positions,
+            batch_indexes_map=batch_indexes_map
         )
-
-    def _dummy_batch(self, batchsize, maxlen):
-        """
-        Create a dummy batch.
-
-        This is used to preinitialize the cuda buffer, or otherwise force a
-        null backward pass after an OOM.
-
-        If your model uses additional inputs beyond text_vec and label_vec,
-        you will need to override it to add additional fields.
-        """
-        text_vec = (
-            torch.arange(1, maxlen + 1)  # need it as long as specified
-            .clamp(max=3)  # cap at 3 for testing with tiny dictionaries
-            .unsqueeze(0)
-            .expand(batchsize, maxlen)
-            .cuda()
-        )
-        # label vec has two tokens to make it interesting, but we we can't use the
-        # start token, it's reserved.
-        label_vec = (
-            torch.LongTensor([self.END_IDX, self.NULL_IDX])
-            .unsqueeze(0)
-            .expand(batchsize, 2)
-            .cuda()
-        )
-        return Batch(
-            text_vec=text_vec, label_vec=label_vec, text_lengths=[maxlen] * batchsize
-        )
-
-    def _init_cuda_buffer(self, batchsize, maxlen, force=False):
-        """
-        Pre-initialize CUDA buffer by doing fake forward pass.
-
-        This is also used in distributed mode to force a worker to sync with others.
-        """
-        if self.use_cuda and (force or not hasattr(self, 'buffer_initialized')):
-            try:
-                self._control_local_metrics(disabled=True)
-                loss = 0 * self.compute_loss(self._dummy_batch(batchsize, maxlen))
-                self._control_local_metrics(enabled=True)
-                self._temporarily_disable_local_metrics = False
-                self.backward(loss)
-                self.buffer_initialized = True
-            except RuntimeError as e:
-                if 'out of memory' in str(e):
-                    m = (
-                        'CUDA OOM: Lower batch size (-bs) from {} or lower '
-                        ' max sequence length (-tr) from {}'
-                        ''.format(batchsize, maxlen)
-                    )
-                    raise RuntimeError(m)
-                else:
-                    raise e
 
     def _pad_tensor(self, items):
         """
