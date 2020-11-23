@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from parlai.core.opt import Opt
 from parlai.core.torch_agent import TorchAgent, Output, Optional, History, Batch
 import parlai.utils.logging as logging
+from parlai.utils.distributed import is_distributed, sync_parameters
 from parlai.utils.torch import PipelineHelper, total_parameters, trainable_parameters, padded_tensor
 from parlai.utils.fp16 import FP16SafeCrossEntropy
 from parlai.core.metrics import AverageMetric
@@ -51,18 +52,19 @@ class DialogueHistory(History):
             on the next dialogue turn. Set to None to stop adding to the
             history.
         """
-        if not self.context:
-            self.context = obs['context']
-        text = obs['question_text']
-        self._update_raw_strings(text)
-        if self.add_person_tokens:
-            text = self._add_person_tokens(
-                obs[self.field], self.p1_token, self.add_p1_after_newln
-            )
-        # update history string
-        self._update_strings(text)
-        # update history vecs
-        self._update_vecs(text)
+        if "text" in obs and obs["text"] is not None:
+            if not self.context:
+                    self.context = obs['context']
+            text = obs['question_text']
+            self._update_raw_strings(text)
+            if self.add_person_tokens:
+                text = self._add_person_tokens(
+                    obs[self.field], self.p1_token, self.add_p1_after_newln
+                )
+            # update history string
+            self._update_strings(text)
+            # update history vecs
+            self._update_vecs(text)
         self.temp_history = temp_history
 
     def get_history_vec(self):
@@ -195,7 +197,7 @@ class TorchSpanAgent(TorchAgent):
         return DialogueHistory
 
     def __init__(self, opt: Opt, shared=None):
-        init_model, self.is_finetune = self._get_init_model(opt, shared)
+        init_model, is_finetune = self._get_init_model(opt, shared)
         super().__init__(opt, shared)
 
         # set up model and optimizers
@@ -216,7 +218,9 @@ class TorchSpanAgent(TorchAgent):
                 )
             if init_model:
                 logging.info(f'Loading existing model parameters from {init_model}')
-                self.load(init_model)
+                states = self.load(init_model)
+            else:
+                states = {}
             if self.use_cuda:
                 if self.model_parallel:
                     ph = PipelineHelper()
@@ -234,14 +238,29 @@ class TorchSpanAgent(TorchAgent):
                 f"Total parameters: {total_params:,d} ({train_params:,d} trainable)"
             )
 
-        if shared:
-            # We don't use get here because hasattr is used on optimizer later.
+            if self.fp16:
+                self.model = self.model.half()
+
+        if shared is not None:
             if 'optimizer' in shared:
                 self.optimizer = shared['optimizer']
         elif self._should_initialize_optimizer():
-            optim_params = [p for p in self.model.parameters() if p.requires_grad]
-            self.init_optim(optim_params)
-            self.build_lr_scheduler()
+            # do this regardless of share state, but don't
+            self.init_optim(
+                [p for p in self.model.parameters() if p.requires_grad],
+                optim_states=states.get('optimizer'),
+                saved_optim_type=states.get('optimizer_type'),
+            )
+            self.build_lr_scheduler(states, hard_reset=is_finetune)
+
+        if shared is None and is_distributed():
+            device_ids = None if self.model_parallel else [self.opt['gpu']]
+            self.model = torch.nn.parallel.DistributedDataParallel(
+                self.model, device_ids=device_ids, broadcast_buffers=False
+            )
+
+        self.reset()
+
 
     def get_temp_history(self, observation) -> Optional[str]:
         """
@@ -270,16 +289,22 @@ class TorchSpanAgent(TorchAgent):
         end_start_pairs = torch.stack((output_start_positions, output_end_positions), dim=1).cpu().data.numpy()
         output_text = []
         output_ids = []
+        combined_pair_conf = []
+        batch_output_text = []
         for i in range(end_start_pairs.shape[0]):
             pair = end_start_pairs[i]
+            start_confidence = start_logits[i][pair[0]]
+            end_confidence = end_logits[i][pair[1]]
+            pair_confidence = start_confidence + end_confidence
+            combined_pair_conf.append(pair_confidence)
             if pair[0] <= pair[1]:
                 output_id = batch.encoding['input_ids'][i][pair[0]: pair[1]+1]
-                text = self.dict.tokenizer.decode(output_id)
+                text = self.dict.tokenizer.decode(output_id).replace("[CLS]", '')
                 output_text.append(text)
                 output_ids.append(output_id)
             else:
                 output_text.append("")
-        model_output = {"output_start_positions": output_start_positions, "output_end_positions": output_end_positions, "span_text": output_text}
+
         total_loss = None
         losses = []
         start_losses = []
@@ -299,6 +324,11 @@ class TorchSpanAgent(TorchAgent):
             for doc_indexes in batch['batch_indexes_map']:
                 cur_loss = 0
                 index_start, index_end = doc_indexes[0], doc_indexes[-1]+1
+                cur_output_tex = output_text[index_start: index_end]
+                cur_pair_conf = combined_pair_conf[index_start: index_end]
+                max_conf_index = cur_pair_conf.index(max(cur_pair_conf))
+                batch_output_text.append(cur_output_tex[max_conf_index])
+
                 cur_start_logits = start_logits[index_start: index_end]
                 cur_end_logits = end_logits[index_start: index_end]
                 start_loss = self.criterion(cur_start_logits, torch.flatten(start_positions[index_start: index_end])).mean()
@@ -319,6 +349,8 @@ class TorchSpanAgent(TorchAgent):
             self.record_local_metric('end_loss', AverageMetric.many(end_losses, batches_count))
             self.record_local_metric('span_acc', AverageMetric.many(correct_span_nums, doc_count))
 
+        model_output = {"output_start_positions": output_start_positions, "output_end_positions": output_end_positions,
+                        "text": batch_output_text}
         total_loss = torch.stack(losses).mean()
         if return_output:
             return (total_loss, model_output)
@@ -390,20 +422,17 @@ class TorchSpanAgent(TorchAgent):
         """
                Train on a single batch of examples.
                """
-        if batch.text_vec is None:
+        if batch.batch_indexes_map is None:
             return
-
-        self.model.eval()
-        loss, model_output = self.compute_loss(batch, model_output=True)
-        _, preds, *_ = model_output
-        if batch.labels is None or self.opt['ignore_labels']:
-            # interactive mode
-            if self.opt.get('print_scores', False):
-                preds = "Not yet implemented interactive mode"
         else:
-            self.record_local_metric('loss', AverageMetric.many(loss))
-            loss = loss.mean()
-            return Output(preds)
+            bsz = len(batch.batch_indexes_map)
+        self.model.eval()
+        loss, model_output = self.compute_loss(batch, return_output=True)
+        preds = model_output['text']
+        return Output(preds)
+
+
+
 
     def _set_label_vec(self, obs, add_start, add_end, label_truncate):
         """
@@ -412,6 +441,8 @@ class TorchSpanAgent(TorchAgent):
         Useful to override to change vectorization behavior
         """
         # convert 'labels' or 'eval_labels' into vectors
+        if 'answer_starts' not in obs or 'answer_ends' not in obs:
+            return None
         obs['label_vec'] = [obs['text_vec'][i][start: end+1]
                             for i, (start, end) in enumerate(zip(obs['answer_starts'], obs['answer_ends']))]
         return obs
@@ -419,11 +450,13 @@ class TorchSpanAgent(TorchAgent):
     # Tokenize our training dataset
     def _set_text_vec(self, obs, history, truncate, is_training=True):
         # Tokenize contexts and questions (as pairs of inputs)
+        if 'text' not in obs:
+            return obs
         text_vecs = []
         full_text_vecs = []
         start_positions = []
         end_positions = []
-        ans_text = obs['labels']
+        ans_text = obs.get('single_label_text', None)
         history_text = self.truncate_with_dic(" ".join(history.history_strings[:-1]), self.history_truncate, latest=True)
         question_text = self.truncate_with_dic(obs['question_text'], self.query_truncate)
         query_tokens = self.dict.tokenizer.tokenize(question_text)
@@ -551,7 +584,7 @@ class TorchSpanAgent(TorchAgent):
             doc_indexes = []
             start_positions.extend(batch['answer_starts'])
             end_positions.extend(batch['answer_ends'])
-            labels.append(batch['labels'])
+            labels.append(batch.get('labels', batch.get('eva_labels')))
             label_vec.extend(batch['label_vec'])
             question_texts.extend(batch['full_text_dict']['question_texts'])
             context_texts.extend(batch['full_text_dict']['context_texts'])
