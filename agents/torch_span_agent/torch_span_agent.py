@@ -288,7 +288,6 @@ class TorchSpanAgent(TorchAgent):
         output_start_positions, output_end_positions = torch.argmax(start_logits, dim=1), torch.argmax(end_logits, dim=1)
         end_start_pairs = torch.stack((output_start_positions, output_end_positions), dim=1).cpu().data.numpy()
         output_text = []
-        output_ids = []
         combined_pair_conf = []
         batch_output_text = []
         for i in range(end_start_pairs.shape[0]):
@@ -300,10 +299,12 @@ class TorchSpanAgent(TorchAgent):
             if pair[0] <= pair[1]:
                 output_id = batch.encoding['input_ids'][i][pair[0]: pair[1]+1]
                 text = self.dict.tokenizer.decode(output_id).replace("[CLS]", '')
-                output_text.append(text)
-                output_ids.append(output_id)
+                if text == "":
+                    output_text.append("[CLS]")
+                else:
+                    output_text.append(text)
             else:
-                output_text.append("")
+                output_text.append("[CLS]")
 
         total_loss = None
         losses = []
@@ -430,8 +431,6 @@ class TorchSpanAgent(TorchAgent):
         loss, model_output = self.compute_loss(batch, return_output=True)
         preds = model_output['text']
         return Output(preds)
-
-
 
 
     def _set_label_vec(self, obs, add_start, add_end, label_truncate):

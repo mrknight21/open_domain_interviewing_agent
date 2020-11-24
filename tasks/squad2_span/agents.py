@@ -3,7 +3,7 @@ from parlai.tasks.squad2.agents import IndexTeacher
 
 import copy
 
-NO_ANSWER_REPLY = "I don't know"
+NO_ANSWER_REPLY = "[CLS]"
 
 class DefaultTeacher(IndexTeacher):
 
@@ -65,7 +65,7 @@ class DefaultTeacher(IndexTeacher):
             start_position = -1
             end_position = -1
             orig_answer_text = ""
-            eva_labels_text = [""]
+            eva_labels_text = [NO_ANSWER_REPLY]
 
 
 

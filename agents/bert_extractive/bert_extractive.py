@@ -11,7 +11,8 @@ from transformers import BertTokenizer, BertModel, BertForQuestionAnswering
 from transformers.data.processors.squad import SquadV2Processor
 
 SPECIAL_TOKENS = {"unk_token": "[UNK]", "sep_token": "[SEP]",
-                  "pad_token": "[PAD]", "cls_token":"[CLS]", "mask_token": "[MASK]"}
+                  "pad_token": "[PAD]", "cls_token": "[CLS]",
+                  "mask_token": "[MASK]"}
 
 class BertEncoder(torch.nn.Module):
     """
@@ -105,6 +106,7 @@ class BertDictionaryAgent(HuggingFaceDictionaryAgent):
             self.pad_token = SPECIAL_TOKENS["pad_token"]
             self.cls_token = SPECIAL_TOKENS["cls_token"]
             self.mask_token = SPECIAL_TOKENS["mask_token"]
+            self.no_answer_token = SPECIAL_TOKENS["cls_token"]
 
     def txt2vec(self, text, vec_type=list):
         tokens = self.tokenizer.tokenize(text)
