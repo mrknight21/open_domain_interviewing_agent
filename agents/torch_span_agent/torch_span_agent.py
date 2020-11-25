@@ -649,7 +649,7 @@ class TorchSpanAgent(TorchAgent):
             return ""
         tokens = text.split(" ")
         if latest:
-            tokens = tokens.reverse()
+            tokens.reverse()
         tokens_in_range = []
         tokens_count = 0
         for (i, token) in enumerate(tokens):
@@ -660,7 +660,7 @@ class TorchSpanAgent(TorchAgent):
             for sub_token in sub_tokens:
                 tokens_count += 1
         if latest:
-            tokens_in_range = tokens_in_range.reverse()
+            tokens_in_range.reverse()
         return " ".join(tokens_in_range)
 
     def slice_text_with_token_index(self, text, start, end):

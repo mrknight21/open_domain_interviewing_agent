@@ -1,5 +1,6 @@
 
 from parlai.tasks.squad2.agents import IndexTeacher
+from parlai_internal.utilities import util
 
 import copy
 
@@ -16,20 +17,7 @@ class DefaultTeacher(IndexTeacher):
         article = self.squad[article_idx]
         paragraph = article['paragraphs'][paragraph_idx]
         paragraph_text = paragraph["context"]
-        doc_tokens = []
-        char_to_word_offset = []
-        prev_is_whitespace = True
-        for c in paragraph_text:
-            if self.is_whitespace(c):
-                prev_is_whitespace = True
-            else:
-                if prev_is_whitespace:
-                    doc_tokens.append(c)
-                else:
-                    doc_tokens[-1] += c
-                prev_is_whitespace = False
-            char_to_word_offset.append(len(doc_tokens) - 1)
-
+        doc_tokens, char_to_word_offset = util.build_char_word_offset_list(paragraph)
         qa = paragraph["qas"][qa_idx]
         qas_id = qa["id"]
         question_text = qa["question"]
@@ -55,7 +43,7 @@ class DefaultTeacher(IndexTeacher):
             actual_text = " ".join(
                 doc_tokens[start_position:(end_position + 1)])
             cleaned_answer_text = " ".join(
-                self.whitespace_tokenize(orig_answer_text))
+                util.whitespace_tokenize(orig_answer_text))
             eva_labels_text = [ans['text'] for ans in qa["answers"]]
             if actual_text.find(cleaned_answer_text) == -1:
                 print("Could not find answer: '%s' vs. '%s'",
@@ -85,28 +73,4 @@ class DefaultTeacher(IndexTeacher):
         }
         return action
 
-    def get_start_end_idx(self, gold_text, start_idx, context):
-        end_idx = start_idx + len(gold_text)
-        # sometimes squad answers are off by a character or two – fix this
-        if context[start_idx:end_idx] == gold_text:
-            return start_idx, end_idx
-        elif context[start_idx - 1:end_idx - 1] == gold_text:
-            start_idx = start_idx - 1
-            end_idx = end_idx - 1  # When the gold label is off by one character
-        elif context[start_idx - 2:end_idx - 2] == gold_text:
-            start_idx = start_idx - 2
-            end_idx = end_idx - 2  # When the gold label is off by two characters
-        return start_idx, end_idx
 
-    def is_whitespace(self, c):
-        if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
-          return True
-        return False
-
-    def whitespace_tokenize(self, text):
-        """Runs basic whitespace cleaning and splitting on a piece of text."""
-        text = text.strip()
-        if not text:
-            return []
-        tokens = text.split()
-        return tokens
