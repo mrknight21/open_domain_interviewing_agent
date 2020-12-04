@@ -1,5 +1,5 @@
-from parlai.tasks.quac.agents import DefaultTeacher as quac_teacher, _path
-from parlai_internal.utilities import  util
+from parlai.tasks.quac.agents import DefaultTeacher as quac_teacher,_path
+from parlai_internal.utilities import util
 
 NO_ANSWER_REPLY = "[CLS]"
 
@@ -51,7 +51,7 @@ class DefaultTeacher(quac_teacher):
         action = {
             'id': 'quac',
             'qas_id': str(episode_idx) + "_" + str(entry_idx),
-            'text': context + ' [SEP] ' + question_text,
+            'text': context + ' ' + question_text,
             'doc_tokens': doc_tokens,
             'context': context,
             'question_text': question_text,
@@ -60,6 +60,7 @@ class DefaultTeacher(quac_teacher):
             'episode_done': ex['episode_done'],
             'start_position': start_position,
             'end_position': end_position,
+            'char_answer_start': ex['answer_starts'],
             'is_impossible': is_impossible
         }
         return action

@@ -6,9 +6,8 @@ from parlai_internal.agents.torch_span_agent.torch_span_agent import TorchSpanAg
 from parlai.agents.hugging_face.dict import HuggingFaceDictionaryAgent
 from parlai.utils.misc import warn_once
 import parlai.utils.logging as logging
-from parlai.utils.torch import IdentityLayer, concat_without_padding, padded_tensor
-from transformers import BertTokenizer, BertModel, BertForQuestionAnswering
-from transformers.data.processors.squad import SquadV2Processor
+from parlai.utils.torch import padded_tensor
+from transformers import BertTokenizer, BertModel
 
 SPECIAL_TOKENS = {"unk_token": "[UNK]", "sep_token": "[SEP]",
                   "pad_token": "[PAD]", "cls_token": "[CLS]",
@@ -108,11 +107,6 @@ class BertDictionaryAgent(HuggingFaceDictionaryAgent):
             self.mask_token = SPECIAL_TOKENS["mask_token"]
             self.no_answer_token = SPECIAL_TOKENS["cls_token"]
 
-    def txt2vec(self, text, vec_type=list):
-        tokens = self.tokenizer.tokenize(text)
-        tokens_id = self.tokenizer.convert_tokens_to_ids(tokens)
-        return tokens_id
-
     def override_special_tokens(self, opt):
         # define special tokens
         self._define_special_tokens(opt)
@@ -136,14 +130,14 @@ class BertDictionaryAgent(HuggingFaceDictionaryAgent):
         self.ind2tok[self.mask_idx] = self.mask_token
 
 
-class BertExtractiveAgent(TorchSpanAgent):
+class BertQuestionAnsweringAgent(TorchSpanAgent):
     """
     Hugging Face Bert Agent.
     """
 
     @classmethod
     def add_cmdline_args(cls, argparser):
-        agent = argparser.add_argument_group("Gpt2 Args")
+        agent = argparser.add_argument_group("BertQa Args")
         agent.add_argument(
             "--bert-type",
             type=str,
@@ -163,7 +157,7 @@ class BertExtractiveAgent(TorchSpanAgent):
             label_truncate=256,
             dict_maxexs=0,  # skip building dictionary
         )
-        super(BertExtractiveAgent, cls).add_cmdline_args(argparser)
+        super(BertQuestionAnsweringAgent, cls).add_cmdline_args(argparser)
         warn_once("WARNING: this model is in beta and the API is subject to change.")
         return agent
 
@@ -191,21 +185,6 @@ class BertExtractiveAgent(TorchSpanAgent):
         """
         return HFBertQAModel(self.opt, self.dict)
 
-    def _model_input(self, batch):
-        """
-        Override to pass in text lengths.
-        """
-        return (batch.encoding)
 
-    def _encoder_input(self, batch):
-        return (batch.text_vec)
-
-    def _pad_tensor(self, items):
-        """
-        Override to always set fp16friendly to False.
-        """
-        return padded_tensor(
-            items, pad_idx=self.dict.pad_idx, use_cuda=self.use_cuda, fp16friendly=False
-        )
 
 

@@ -11,9 +11,10 @@ from parlai.utils.torch import PipelineHelper, total_parameters, trainable_param
 from parlai.utils.fp16 import FP16SafeCrossEntropy
 from parlai.core.metrics import AverageMetric
 from parlai.core.message import Message
+from parlai_internal.utilities import util
+
 from collections import deque
 import collections
-
 import torch
 import torch.nn as nn
 
@@ -451,8 +452,6 @@ class TorchSpanAgent(TorchAgent):
         # Tokenize contexts and questions (as pairs of inputs)
         if 'text' not in obs:
             return obs
-        text_vecs = []
-        full_text_vecs = []
         start_positions = []
         end_positions = []
         ans_text = obs.get('single_label_text', None)
@@ -481,7 +480,7 @@ class TorchSpanAgent(TorchAgent):
                 tok_end_position = orig_to_tok_index[obs['end_position'] + 1] - 1
             else:
                 tok_end_position = len(all_doc_tokens) - 1
-            (tok_start_position, tok_end_position) = self.improve_answer_span(
+            (tok_start_position, tok_end_position) = util.improve_answer_span(
                 all_doc_tokens, tok_start_position, tok_end_position, self.dict.tokenizer,
                 ans_text)
 
@@ -631,18 +630,17 @@ class TorchSpanAgent(TorchAgent):
         Override to always set fp16friendly to False.
         """
         return padded_tensor(
-            items, pad_idx=self.NULL_IDX, use_cuda=self.use_cuda, fp16friendly=False
+            items, pad_idx=self.dict.pad_idx, use_cuda=self.use_cuda, fp16friendly=False
         )
 
-    def piece_word_char_to_token(self, tokens, start_index, answer):
-        token_start_index = []
-        for index, ans in zip(start_index, answer):
-            char_index = 0
-            for token in tokens:
-                subword = False
-                if '##' in token:
-                    subword = True
-                    word = token.replace('##', '')
+    def _model_input(self, batch):
+        """
+        Override to pass in text lengths.
+        """
+        return (batch.encoding)
+
+    def _encoder_input(self, batch):
+        return (batch.text_vec)
 
     def truncate_with_dic(self, text, truncate, latest=False):
         if not text:
@@ -697,50 +695,6 @@ class TorchSpanAgent(TorchAgent):
             char_to_word_offset.append(len(doc_tokens) - 1)
         return char_to_word_offset
 
-    def improve_answer_span(self, doc_tokens, input_start, input_end, tokenizer,
-                             orig_answer_text):
-        tok_answer_text = " ".join(tokenizer.tokenize(orig_answer_text))
 
-        for new_start in range(input_start, input_end + 1):
-            for new_end in range(input_end, new_start - 1, -1):
-                text_span = " ".join(doc_tokens[new_start:(new_end + 1)])
-                if text_span == tok_answer_text:
-                    return (new_start, new_end)
 
-        return (input_start, input_end)
 
-    def _check_is_max_context(self, doc_spans, cur_span_index, position):
-        """Check if this is the 'max context' doc span for the token."""
-
-        # Because of the sliding window approach taken to scoring documents, a single
-        # token can appear in multiple documents. E.g.
-        #  Doc: the man went to the store and bought a gallon of milk
-        #  Span A: the man went to the
-        #  Span B: to the store and bought
-        #  Span C: and bought a gallon of
-        #  ...
-        #
-        # Now the word 'bought' will have two scores from spans B and C. We only
-        # want to consider the score with "maximum context", which we define as
-        # the *minimum* of its left and right context (the *sum* of left and
-        # right context will always be the same, of course).
-        #
-        # In the example the maximum context for 'bought' would be span C since
-        # it has 1 left context and 3 right context, while span B has 4 left context
-        # and 0 right context.
-        best_score = None
-        best_span_index = None
-        for (span_index, doc_span) in enumerate(doc_spans):
-            end = doc_span.start + doc_span.length - 1
-            if position < doc_span.start:
-                continue
-            if position > end:
-                continue
-            num_left_context = position - doc_span.start
-            num_right_context = end - position
-            score = min(num_left_context, num_right_context) + 0.01 * doc_span.length
-            if best_score is None or score > best_score:
-                best_score = score
-                best_span_index = span_index
-
-        return cur_span_index == best_span_index
