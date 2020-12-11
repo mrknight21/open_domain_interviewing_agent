@@ -299,13 +299,13 @@ class TorchSpanAgent(TorchAgent):
             combined_pair_conf.append(pair_confidence)
             if pair[0] <= pair[1]:
                 output_id = batch.encoding['input_ids'][i][pair[0]: pair[1]+1]
-                text = self.dict.tokenizer.decode(output_id).replace("[CLS]", '')
+                text = self.dict.tokenizer.decode(output_id.tolist()).replace(self.dict.cls_token, '')
                 if text == "":
-                    output_text.append("[CLS]")
+                    output_text.append(self.dict.cls_token)
                 else:
                     output_text.append(text)
             else:
-                output_text.append("[CLS]")
+                output_text.append(self.dict.cls_token)
 
         total_loss = None
         losses = []
@@ -551,12 +551,19 @@ class TorchSpanAgent(TorchAgent):
             start_positions.append(start_position)
             end_positions.append(end_position)
 
-        full_text_dict ={'question_texts': question_texts, 'context_texts': context_texts}
+        labels_with_special_tokens = []
+        for l in obs['labels']:
+            if l == "":
+                labels_with_special_tokens.append(self.dict.cls_token)
+            else:
+                labels_with_special_tokens.append(l)
 
+        full_text_dict ={'question_texts': question_texts, 'context_texts': context_texts}
         obs['text_vec'] = text_vecs
         obs['full_text_dict'] = full_text_dict
         obs['answer_starts'] = start_positions
         obs['answer_ends'] = end_positions
+        obs.force_set('labels', labels_with_special_tokens)
         return obs
 
     def batchify(self, obs_batch, sort=False):
@@ -609,9 +616,8 @@ class TorchSpanAgent(TorchAgent):
         if self.use_cuda:
             start_positions = start_positions.cuda()
             end_positions = end_positions.cuda()
-            encodings['input_ids'] = encodings['input_ids'].cuda()
-            encodings['token_type_ids'] = encodings['token_type_ids'].cuda()
-            encodings['attention_mask'] = encodings['attention_mask'].cuda()
+            for k, vector in encodings.items():
+                encodings[k] = encodings[k].cuda()
 
         return Batch(
             batchsize=len(valid_inds),

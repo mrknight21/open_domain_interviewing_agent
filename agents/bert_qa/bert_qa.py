@@ -130,7 +130,7 @@ class BertDictionaryAgent(HuggingFaceDictionaryAgent):
         self.ind2tok[self.mask_idx] = self.mask_token
 
 
-class BertQuestionAnsweringAgent(TorchSpanAgent):
+class BertQaAgent(TorchSpanAgent):
     """
     Hugging Face Bert Agent.
     """
@@ -157,7 +157,7 @@ class BertQuestionAnsweringAgent(TorchSpanAgent):
             label_truncate=256,
             dict_maxexs=0,  # skip building dictionary
         )
-        super(BertQuestionAnsweringAgent, cls).add_cmdline_args(argparser)
+        super(BertQaAgent, cls).add_cmdline_args(argparser)
         warn_once("WARNING: this model is in beta and the API is subject to change.")
         return agent
 

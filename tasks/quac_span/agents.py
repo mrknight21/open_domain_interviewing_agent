@@ -1,7 +1,7 @@
 from parlai.tasks.quac.agents import DefaultTeacher as quac_teacher,_path
 from parlai_internal.utilities import util
 
-NO_ANSWER_REPLY = "[CLS]"
+NO_ANSWER_REPLY = "[NOANSWER]"
 
 class DefaultTeacher(quac_teacher):
 
@@ -46,7 +46,7 @@ class DefaultTeacher(quac_teacher):
             start_position = -1
             end_position = -1
             single_label_text = ""
-            labels = [NO_ANSWER_REPLY]
+            labels = [""]
 
         action = {
             'id': 'quac',

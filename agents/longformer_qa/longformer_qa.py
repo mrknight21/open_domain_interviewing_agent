@@ -234,6 +234,8 @@ class LongformerQaAgent(TorchSpanAgent):
                                                              int(obs['char_answer_start']))
             tok_start_position = context_encodings.char_to_token(start_idx)
             tok_end_position = context_encodings.char_to_token(end_idx-1)
+        if tok_start_position is None or tok_end_position is None:
+            print('no start')
         question_texts = []
         context_texts = []
         text_vecs = []
