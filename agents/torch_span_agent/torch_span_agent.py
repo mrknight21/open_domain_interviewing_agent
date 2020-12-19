@@ -9,7 +9,7 @@ import parlai.utils.logging as logging
 from parlai.utils.distributed import is_distributed, sync_parameters
 from parlai.utils.torch import PipelineHelper, total_parameters, trainable_parameters, padded_tensor
 from parlai.utils.fp16 import FP16SafeCrossEntropy
-from parlai.core.metrics import AverageMetric
+from parlai.core.metrics import AverageMetric, F1Metric
 from parlai.core.message import Message
 from parlai_internal.utilities import util
 
@@ -283,6 +283,7 @@ class TorchSpanAgent(TorchAgent):
                 """
         if batch.label_vec is None:
             raise ValueError('Cannot compute loss without a label.')
+        no_answer_reply = batch.get('no_answer_reply', self.dict.cls_token)
         start_logits, end_logits, sequence_output = self.model(self._model_input(batch))
         start_positions = batch.get('start_positions', None)
         end_positions = batch.get('end_positions', None)
@@ -301,11 +302,11 @@ class TorchSpanAgent(TorchAgent):
                 output_id = batch.encoding['input_ids'][i][pair[0]: pair[1]+1]
                 text = self.dict.tokenizer.decode(output_id.tolist()).replace(self.dict.cls_token, '')
                 if text == "":
-                    output_text.append(self.dict.cls_token)
+                    output_text.append(no_answer_reply)
                 else:
                     output_text.append(text)
             else:
-                output_text.append(self.dict.cls_token)
+                output_text.append(no_answer_reply)
 
         total_loss = None
         losses = []
@@ -458,34 +459,27 @@ class TorchSpanAgent(TorchAgent):
         history_text = self.truncate_with_dic(" ".join(history.history_strings[:-1]), self.history_truncate, latest=True)
         question_text = self.truncate_with_dic(obs['question_text'], self.query_truncate)
         query_tokens = self.dict.tokenizer.tokenize(question_text)
-
-        tok_to_orig_index = []
-        orig_to_tok_index = []
-        all_doc_tokens = []
-        for (i, token) in enumerate(obs['doc_tokens']):
-            orig_to_tok_index.append(len(all_doc_tokens))
-            sub_tokens = self.dict.tokenizer.tokenize(token)
-            for sub_token in sub_tokens:
-                tok_to_orig_index.append(i)
-                all_doc_tokens.append(sub_token)
-
-        tok_start_position = None
-        tok_end_position = None
+        # The -3 accounts for [CLS], [SEP] and [SEP] and [SEP]
+        max_tokens_for_doc = self.truncate - len(query_tokens) - self.history_truncate - 4
+        context_encodings = self.dict.tokenizer.encode_plus(obs['context'], add_special_tokens=False)
+        all_doc_tokens = context_encodings['input_ids']
         if is_training and obs['is_impossible']:
             tok_start_position = -1
             tok_end_position = -1
-        if is_training and not obs['is_impossible']:
-            tok_start_position = orig_to_tok_index[obs['start_position']]
-            if obs['end_position'] < len(obs['doc_tokens']) - 1:
-                tok_end_position = orig_to_tok_index[obs['end_position'] + 1] - 1
+        elif is_training :
+            start_idx, end_idx = util.get_correct_alignement(obs['context'], obs['single_label_text'],
+                                                             int(obs['char_answer_start']))
+            if context_encodings._encodings:
+                tok_start_position = context_encodings.char_to_token(start_idx)
+                tok_end_position = context_encodings.char_to_token(end_idx-1)
             else:
-                tok_end_position = len(all_doc_tokens) - 1
-            (tok_start_position, tok_end_position) = util.improve_answer_span(
-                all_doc_tokens, tok_start_position, tok_end_position, self.dict.tokenizer,
-                ans_text)
-
-        # The -3 accounts for [CLS], [SEP] and [SEP] and [SEP]
-        max_tokens_for_doc = self.truncate - len(query_tokens) - self.history_truncate - 4
+                tok_start_position, tok_end_position, _ = self.get_token_start_end_position(context_encodings,
+                                                                                         ans_text,
+                                                                                         obs['char_answer_start'])
+        if tok_start_position is None or tok_end_position is None:
+            print('no start or no end')
+            tok_start_position = -1
+            tok_end_position = -1
 
         # We can have documents that are longer than the maximum sequence length.
         # To deal with this we do a sliding window approach, where we take chunks
@@ -508,10 +502,10 @@ class TorchSpanAgent(TorchAgent):
         text_vecs = []
 
         if len(doc_spans) > 1:
-            logging.info('Chuncking document with {} tokens shift'.format(self.doc_stride))
+            logging.info('Chuncking document with {} tokens shift into {} documents'.format(self.doc_stride, len(doc_spans)))
         for (doc_span_index, doc_span) in enumerate(doc_spans):
             # context_tokens = all_doc_tokens[doc_span[0]:doc_span[1]]
-            context_text = self.slice_text_with_token_index(obs['context'], doc_span[0], doc_span[1])
+            context_text = self.dict.tokenizer.decode(context_encodings['input_ids'][doc_span[0]: doc_span[0]+doc_span[1]])
             if history_text:
                 context_text = context_text + " " + history_text
 
@@ -530,7 +524,7 @@ class TorchSpanAgent(TorchAgent):
                     start_position = 0
                     end_position = 0
                 else:
-                    doc_offset = len(query_tokens) + 2
+                    doc_offset = len(query_tokens) + self.dict.QA_SPECIAL_TOKENS_OFFSET
                     start_position = tok_start_position - doc_start + doc_offset
                     end_position = tok_end_position - doc_start + doc_offset
 
@@ -552,7 +546,7 @@ class TorchSpanAgent(TorchAgent):
             end_positions.append(end_position)
 
         labels_with_special_tokens = []
-        for l in obs['labels']:
+        for l in obs.get('labels', obs.get('eval_labels', [])):
             if l == "":
                 labels_with_special_tokens.append(self.dict.cls_token)
             else:
@@ -563,7 +557,10 @@ class TorchSpanAgent(TorchAgent):
         obs['full_text_dict'] = full_text_dict
         obs['answer_starts'] = start_positions
         obs['answer_ends'] = end_positions
-        obs.force_set('labels', labels_with_special_tokens)
+        if 'labels' in obs:
+            obs.force_set('labels', labels_with_special_tokens)
+        elif 'eval_labels' in obs:
+            obs.force_set('eval_labels', labels_with_special_tokens)
         return obs
 
     def batchify(self, obs_batch, sort=False):
@@ -628,7 +625,8 @@ class TorchSpanAgent(TorchAgent):
             observations=exs,
             start_positions=start_positions,
             end_positions=end_positions,
-            batch_indexes_map=batch_indexes_map
+            batch_indexes_map=batch_indexes_map,
+            no_answer_reply=obs_batch[0].get('no_answer_reply', self.dict.cls_token)
         )
 
     def _pad_tensor(self, items):
@@ -667,9 +665,10 @@ class TorchSpanAgent(TorchAgent):
             tokens_in_range.reverse()
         return " ".join(tokens_in_range)
 
-    def slice_text_with_token_index(self, text, start, end):
+    def slice_text_with_token_index(self, text, start, length):
         if not text:
             return ""
+        end = start+length
         tokens = text.split(" ")
         tokens_in_range = []
         subwords_count = 0
@@ -701,6 +700,43 @@ class TorchSpanAgent(TorchAgent):
             char_to_word_offset.append(len(doc_tokens) - 1)
         return char_to_word_offset
 
-
-
-
+    # a shifting window size function that aims to find the start end indx for the max f1 score sequence in the context
+    def get_token_start_end_position(self, context_encoding, answer_text, start_char, offset_allowance=50):
+        answer_vector = self.dict.tokenizer.encode_plus(answer_text, add_special_tokens=False)
+        normalised_answer_text = self.dict.tokenizer.decode(answer_vector['input_ids'])
+        tokens_window_size = len(answer_vector['input_ids'])
+        context_tokens = context_encoding['input_ids']
+        max_no_context = len(context_tokens)
+        max_answer_string = normalised_answer_text
+        start = None
+        end = None
+        max_score = 0
+        for i, _ in enumerate(context_tokens):
+            cur_start = i
+            cur_end = i + tokens_window_size
+            if cur_end > max_no_context:
+                break
+            if cur_start == 0 and start_char != 0:
+                continue
+            else:
+                char_count_before_start = len(self.dict.tokenizer.decode(context_tokens[:cur_start]))
+                # Skip current step, because too early from the start char
+                if char_count_before_start < start_char - offset_allowance:
+                    continue
+                # stop searching because oo far from the start char
+                elif char_count_before_start > start_char + offset_allowance:
+                    break
+            cur_tokens = context_tokens[cur_start:cur_end]
+            cur_string = self.dict.tokenizer.decode(cur_tokens)
+            if cur_string == normalised_answer_text:
+                start = cur_start
+                end = cur_end
+                max_answer_string = cur_string
+                break
+            else:
+                _, _, cur_f1 = F1Metric._prec_recall_f1_score(cur_string, normalised_answer_text)
+                if cur_f1 > max_score:
+                    start = cur_start
+                    end = cur_end
+                    max_answer_string = cur_string
+        return start, end, max_answer_string

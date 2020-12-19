@@ -236,6 +236,8 @@ class LongformerQaAgent(TorchSpanAgent):
             tok_end_position = context_encodings.char_to_token(end_idx-1)
         if tok_start_position is None or tok_end_position is None:
             print('no start')
+            tok_start_position = -1
+            tok_end_position = -1
         question_texts = []
         context_texts = []
         text_vecs = []
@@ -307,19 +309,6 @@ class LongformerQaAgent(TorchSpanAgent):
         obs['answer_starts'] = start_positions
         obs['answer_ends'] = end_positions
         return obs
-
-
-    def get_correct_alignement(self, context, gold_text, start_idx):
-        """ Some original examples in SQuAD have indices wrong by 1 or 2 character. We test and fix this here. """
-        end_idx = start_idx + len(gold_text)
-        if context[start_idx:end_idx] == gold_text:
-            return start_idx, end_idx  # When the gold label position is good
-        elif context[start_idx - 1:end_idx - 1] == gold_text:
-            return start_idx - 1, end_idx - 1  # When the gold label is off by one character
-        elif context[start_idx - 2:end_idx - 2] == gold_text:
-            return start_idx - 2, end_idx - 2  # When the gold label is off by two character
-        else:
-            raise ValueError()
 
 
     # Tokenize our training dataset

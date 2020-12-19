@@ -99,3 +99,15 @@ def improve_answer_span(doc_tokens, input_start, input_end, tokenizer, orig_answ
             if text_span == tok_answer_text:
                 return new_start, new_end
     return input_start, input_end
+
+def get_correct_alignement(context, gold_text, start_idx):
+    """ Some original examples in SQuAD have indices wrong by 1 or 2 character. We test and fix this here. """
+    end_idx = start_idx + len(gold_text)
+    if context[start_idx:end_idx] == gold_text:
+        return start_idx, end_idx  # When the gold label position is good
+    elif context[start_idx - 1:end_idx - 1] == gold_text:
+        return start_idx - 1, end_idx - 1  # When the gold label is off by one character
+    elif context[start_idx - 2:end_idx - 2] == gold_text:
+        return start_idx - 2, end_idx - 2  # When the gold label is off by two character
+    else:
+        raise ValueError()

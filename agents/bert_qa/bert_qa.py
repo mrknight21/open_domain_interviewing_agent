@@ -83,6 +83,9 @@ class HFBertQAModel(TorchExtractiveModel):
 
 
 class BertDictionaryAgent(HuggingFaceDictionaryAgent):
+    # '[CLS]' and '[SEP]'
+    QA_SPECIAL_TOKENS_OFFSET = 2
+
     def is_prebuilt(self):
         """
         Indicates whether the dictionary is fixed, and does not require building.
