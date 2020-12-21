@@ -471,15 +471,11 @@ class TorchSpanAgent(TorchAgent):
                                                              int(obs['char_answer_start']))
             if context_encodings._encodings:
                 tok_start_position = context_encodings.char_to_token(start_idx)
-                tok_end_position = context_encodings.char_to_token(end_idx-1)
-            else:
+                tok_end_position = context_encodings.char_to_token(end_idx)
+            if tok_start_position is None or tok_end_position is None:
                 tok_start_position, tok_end_position, _ = self.get_token_start_end_position(context_encodings,
                                                                                          ans_text,
-                                                                                         obs['char_answer_start'])
-        if tok_start_position is None or tok_end_position is None:
-            print('no start or no end')
-            tok_start_position = -1
-            tok_end_position = -1
+                                                                                         start_idx)
 
         # We can have documents that are longer than the maximum sequence length.
         # To deal with this we do a sliding window approach, where we take chunks
@@ -515,7 +511,7 @@ class TorchSpanAgent(TorchAgent):
                 # For training, if our document chunk does not contain an annotation
                 # we throw it out, since there is nothing to predict.
                 doc_start = doc_span.start
-                doc_end = doc_span.start + doc_span.length - 1
+                doc_end = doc_span.start + doc_span.length
                 out_of_span = False
                 if not (tok_start_position >= doc_start and
                         tok_end_position <= doc_end):
@@ -707,7 +703,7 @@ class TorchSpanAgent(TorchAgent):
         tokens_window_size = len(answer_vector['input_ids'])
         context_tokens = context_encoding['input_ids']
         max_no_context = len(context_tokens)
-        max_answer_string = normalised_answer_text
+        best_answer_string = normalised_answer_text
         start = None
         end = None
         max_score = 0
@@ -731,12 +727,13 @@ class TorchSpanAgent(TorchAgent):
             if cur_string == normalised_answer_text:
                 start = cur_start
                 end = cur_end
-                max_answer_string = cur_string
+                best_answer_string = cur_string
                 break
             else:
                 _, _, cur_f1 = F1Metric._prec_recall_f1_score(cur_string, normalised_answer_text)
                 if cur_f1 > max_score:
                     start = cur_start
                     end = cur_end
-                    max_answer_string = cur_string
-        return start, end, max_answer_string
+                    best_answer_string = cur_string
+                    max_score = cur_f1
+        return start, end, best_answer_string
