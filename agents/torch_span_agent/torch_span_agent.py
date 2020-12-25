@@ -2,28 +2,35 @@
 Torch Classifier Agents extract answer text from the context by prediction the start_index and end_index.
 """
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from parlai.core.opt import Opt
 from parlai.core.torch_agent import TorchAgent, Output, Optional, History, Batch
 import parlai.utils.logging as logging
-from parlai.utils.distributed import is_distributed, sync_parameters
+from parlai.utils.distributed import is_distributed
 from parlai.utils.torch import PipelineHelper, total_parameters, trainable_parameters, padded_tensor
 from parlai.utils.fp16 import FP16SafeCrossEntropy
+from parlai.utils.data import DatatypeHelper
 from parlai.core.metrics import AverageMetric, F1Metric
 from parlai.core.message import Message
-from parlai_internal.utilities import util
+
+from transformers import (
+    AutoConfig,
+    AutoModelForQuestionAnswering,
+)
+from transformers.data.processors.squad import (
+    SquadFeatures,
+    _new_check_is_max_context,
+    _improve_answer_span,
+    MULTI_SEP_TOKENS_TOKENIZERS_SET,
+    whitespace_tokenize
+)
+from transformers.tokenization_utils_base import TruncationStrategy
+
 
 from collections import deque
-import collections
+import numpy as np
 import torch
 import torch.nn as nn
-
-
-def is_whitespace(c):
-    if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
-        return True
-    return False
-
 
 
 class DialogueHistory(History):
@@ -101,33 +108,34 @@ class TorchExtractiveModel(nn.Module, ABC):
         takes decoder outputs and returns the answer_start logits and answer_end logit
     """
 
-    def __init__(
-            self
-    ):
+    def __init__(self, opt):
         super().__init__()
-        self.num_labels = 2
+        self.config_key = self.get_config_key(opt)
+        self.hfconfig = AutoConfig.from_pretrained(self.config_key)
+        self.use_cuda = not opt["no_cuda"] and torch.cuda.is_available()
+        self.init_model(opt)
+
+    def init_model(self, opt):
+        self.transformer = AutoModelForQuestionAnswering.from_pretrained(
+            self.config_key, config=self.hfconfig
+        )
 
     def forward(self,
         inputs,
         output_attentions=None,
         output_hidden_states=None,
         ):
-        """
 
-        """
-        outputs = self.encoder.transformer(
+        outputs = self.transformer(
             **inputs,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
+            return_dict=True
         )
+        return outputs
 
-        sequence_output = outputs[0]
-        logits = self.qa_outputs(sequence_output)
-        start_logits, end_logits = logits.split(1, dim=-1)
-        start_logits = start_logits.squeeze(-1)
-        end_logits = end_logits.squeeze(-1)
-
-        return start_logits, end_logits, sequence_output
+    def get_config_key(self, opt):
+        raise NotImplementedError('not implemented for this class')
 
 
 class TorchSpanAgent(TorchAgent):
@@ -205,7 +213,7 @@ class TorchSpanAgent(TorchAgent):
         self.query_truncate = opt['query_maximum_length']
         self.context_truncate = opt['context_maximum_length']
         self.history_truncate = opt['history_maximum_length']
-        self.truncate = self.dict.tokenizer.max_len
+        self.truncate = self.dict.tokenizer.model_max_length
         self.doc_stride = opt['doc_stride']
 
         if shared:
@@ -281,84 +289,91 @@ class TorchSpanAgent(TorchAgent):
                 If return_output is True, the full output from the call to self.model()
                 is also returned, via a (loss, model_output) pair.
                 """
-        if batch.label_vec is None:
-            raise ValueError('Cannot compute loss without a label.')
+        if batch.text_vec is None:
+            raise ValueError('Cannot generate outputs without text vectors.')
         no_answer_reply = batch.get('no_answer_reply', self.dict.cls_token)
-        start_logits, end_logits, sequence_output = self.model(self._model_input(batch))
-        start_positions = batch.get('start_positions', None)
-        end_positions = batch.get('end_positions', None)
-        output_start_positions, output_end_positions = torch.argmax(start_logits, dim=1), torch.argmax(end_logits, dim=1)
-        end_start_pairs = torch.stack((output_start_positions, output_end_positions), dim=1).cpu().data.numpy()
-        output_text = []
-        combined_pair_conf = []
-        batch_output_text = []
-        for i in range(end_start_pairs.shape[0]):
-            pair = end_start_pairs[i]
-            start_confidence = start_logits[i][pair[0]]
-            end_confidence = end_logits[i][pair[1]]
-            pair_confidence = start_confidence + end_confidence
-            combined_pair_conf.append(pair_confidence)
-            if pair[0] <= pair[1]:
-                output_id = batch.encoding['input_ids'][i][pair[0]: pair[1]+1]
-                text = self.dict.tokenizer.decode(output_id.tolist()).replace(self.dict.cls_token, '')
-                if text == "":
-                    output_text.append(no_answer_reply)
-                else:
-                    output_text.append(text)
-            else:
-                output_text.append(no_answer_reply)
-
-        total_loss = None
-        losses = []
-        start_losses = []
-        end_losses = []
-        correct_span_nums = []
-        if batch.get('start_positions', None) is not None:
-            # If we are on multi-GPU, split add a dimension
-            #
-            if len(start_positions.size()) > 1:
-                start_positions = start_positions.squeeze(-1)
-            if len(end_positions.size()) > 1:
-                end_positions = end_positions.squeeze(-1)
-            # # sometimes the start/end positions are outside our model inputs, we ignore these terms
-            ignored_index = start_logits.size(1)
-            start_positions.clamp_(0, ignored_index)
-            end_positions.clamp_(0, ignored_index)
-            for doc_indexes in batch['batch_indexes_map']:
-                cur_loss = 0
-                index_start, index_end = doc_indexes[0], doc_indexes[-1]+1
-                cur_output_tex = output_text[index_start: index_end]
-                cur_pair_conf = combined_pair_conf[index_start: index_end]
-                max_conf_index = cur_pair_conf.index(max(cur_pair_conf))
-                batch_output_text.append(cur_output_tex[max_conf_index])
-
-                cur_start_logits = start_logits[index_start: index_end]
-                cur_end_logits = end_logits[index_start: index_end]
-                start_loss = self.criterion(cur_start_logits, torch.flatten(start_positions[index_start: index_end])).mean()
-                end_loss = self.criterion(cur_end_logits, torch.flatten(end_positions[index_start: index_end])).mean()
-                cur_loss = (start_loss + end_loss) / 2
-                start_corrects = output_start_positions[index_start: index_end] == start_positions[index_start: index_end]
-                end_corrects = output_end_positions[index_start: index_end] == end_positions[index_start: index_end]
-                correct_span_num = start_corrects * end_corrects
-                correct_span_num = correct_span_num.sum()
-                losses.append(cur_loss)
-                start_losses.append(start_loss)
-                end_losses.append(end_loss)
-                correct_span_nums.append(correct_span_num)
-            batches_count = [1]*len(batch['batch_indexes_map'])
-            doc_count = [len(doc_indexes) for doc_indexes in batch['batch_indexes_map']]
-            self.record_local_metric('total_loss', AverageMetric.many(losses, batches_count))
-            self.record_local_metric('start_loss', AverageMetric.many(start_losses, batches_count))
-            self.record_local_metric('end_loss', AverageMetric.many(end_losses, batches_count))
-            self.record_local_metric('span_acc', AverageMetric.many(correct_span_nums, doc_count))
-
-        model_output = {"output_start_positions": output_start_positions, "output_end_positions": output_end_positions,
-                        "text": batch_output_text}
-        total_loss = torch.stack(losses).mean()
+        output = self.model(self._model_input(batch))
         if return_output:
-            return (total_loss, model_output)
+            start_logits, end_logits= output['start_logits'].detach().cpu(), output['end_logits'].detach().cpu()
+            # total_loss = output['loss']
+            # start_logits, end_logits, sequence_output = self.model(self._model_input(batch))
+            start_positions = batch.get('start_positions', None)
+            end_positions = batch.get('end_positions', None)
+            output_start_positions, output_end_positions = torch.argmax(start_logits, dim=1), torch.argmax(end_logits, dim=1)
+            end_start_pairs = torch.stack((output_start_positions, output_end_positions), dim=1).cpu().data.numpy()
+            output_text = []
+            combined_pair_conf = []
+            batch_output_text = []
+            for i in range(end_start_pairs.shape[0]):
+                pair = end_start_pairs[i]
+                start_confidence = start_logits[i][pair[0]]
+                end_confidence = end_logits[i][pair[1]]
+                pair_confidence = start_confidence + end_confidence
+                combined_pair_conf.append(pair_confidence)
+                if pair[0] <= pair[1]:
+                    output_id = batch.text_vec[i][pair[0]: pair[1]+1]
+                    text = self.dict.tokenizer.decode(output_id.tolist()).replace(self.dict.cls_token, '')
+                    if text == "":
+                        output_text.append(no_answer_reply)
+                    else:
+                        output_text.append(text)
+                else:
+                    output_text.append(no_answer_reply)
+
+            losses = []
+            start_losses = []
+            end_losses = []
+            correct_span_nums = []
+            if batch.get('start_positions', None) is not None:
+                # start_positions = start_positions.detach().cpu()
+                # end_positions = end_positions.detach().cpu()
+                # # If we are on multi-GPU, split add a dimension
+                # if len(start_positions.size()) > 1:
+                #     start_positions = start_positions.squeeze(-1)
+                # if len(end_positions.size()) > 1:
+                #     end_positions = end_positions.squeeze(-1)
+                # # # sometimes the start/end positions are outside our model inputs, we ignore these terms
+                #
+                # ignored_index = start_logits.size(1)
+                # start_positions.clamp_(0, ignored_index)
+                # end_positions.clamp_(0, ignored_index)
+                for doc_indexes in batch['batch_indexes_map']:
+                    cur_loss = 0
+                    index_start, index_end = doc_indexes[0], doc_indexes[-1]+1
+                    cur_output_tex = output_text[index_start: index_end]
+                    cur_pair_conf = combined_pair_conf[index_start: index_end]
+                    max_conf_index = cur_pair_conf.index(max(cur_pair_conf))
+                    batch_output_text.append(cur_output_tex[max_conf_index])
+            #
+            #     cur_start_logits = start_logits[index_start: index_end]
+            #     cur_end_logits = end_logits[index_start: index_end]
+            #     start_loss = self.criterion(cur_start_logits, torch.flatten(start_positions[index_start: index_end])).mean()
+            #     end_loss = self.criterion(cur_end_logits, torch.flatten(end_positions[index_start: index_end])).mean()
+            #     cur_loss = (start_loss + end_loss) / 2
+            #     start_corrects = output_start_positions[index_start: index_end] == start_positions[index_start: index_end]
+            #     end_corrects = output_end_positions[index_start: index_end] == end_positions[index_start: index_end]
+            #     correct_span_num = start_corrects * end_corrects
+            #     correct_span_num = correct_span_num.sum()
+            #     losses.append(cur_loss)
+            #     start_losses.append(start_loss)
+            #     end_losses.append(end_loss)
+            #     correct_span_nums.append(correct_span_num)
+            # doc_count = [len(doc_indexes) for doc_indexes in batch['batch_indexes_map']]
+            # self.record_local_metric('docs_loss', AverageMetric.many(losses, batches_count))
+            # self.record_local_metric('start_loss', AverageMetric.many(start_losses, batches_count))
+            # self.record_local_metric('end_loss', AverageMetric.many(end_losses, batches_count))
+            # self.record_local_metric('span_acc', AverageMetric.many(correct_span_nums, doc_count))
+
+            model_output = {"output_start_positions": output_start_positions,
+                            "output_end_positions": output_end_positions,
+                            "text": batch_output_text}
+        batches_count = [1] * batch.batchsize
+        self.record_local_metric('loss', AverageMetric.many([output['loss'].data.cpu()]*batch.batchsize, batches_count))
+
+        if return_output:
+            return (output['loss'], model_output)
         else:
-            return total_loss
+            return output['loss']
 
     def build_criterion(self):
         """
@@ -403,7 +418,7 @@ class TorchSpanAgent(TorchAgent):
         self.zero_grad()
 
         try:
-            loss, model_output = self.compute_loss(batch, return_output=True)
+            loss = self.compute_loss(batch)
             self.backward(loss)
             self.update_params()
             oom_sync = False
@@ -428,7 +443,7 @@ class TorchSpanAgent(TorchAgent):
         if batch.batch_indexes_map is None:
             return
         else:
-            bsz = len(batch.batch_indexes_map)
+            bsz = batch.batchsize
         self.model.eval()
         loss, model_output = self.compute_loss(batch, return_output=True)
         preds = model_output['text']
@@ -442,188 +457,395 @@ class TorchSpanAgent(TorchAgent):
         Useful to override to change vectorization behavior
         """
         # convert 'labels' or 'eval_labels' into vectors
-        if 'answer_starts' not in obs or 'answer_ends' not in obs:
+        if not obs.get('features_vec', None):
             return None
-        obs['label_vec'] = [obs['text_vec'][i][start: end+1]
-                            for i, (start, end) in enumerate(zip(obs['answer_starts'], obs['answer_ends']))]
+        obs['label_vec'] = [f.input_ids[f.start_position:f.end_position+1] for f in obs['text_vec']]
         return obs
+
+    def squad_convert_example_to_features(self, example, max_seq_length, doc_stride,
+                                          max_query_length, padding_strategy, is_training):
+        features = []
+        tokenizer = self.dict.tokenizer
+        if self.history_truncate > 0 and len(self.history.history_strings) > 0:
+            tokens_count = 0
+            history_text = ""
+            for h_string in reversed(self.history.history_strings):
+                tokens = tokenizer.tokenize(h_string)
+                tokens_count += len(tokens)
+                if tokens_count <= self.history_truncate:
+                    history_text += h_string
+                else:
+                    break
+            truncated_history = [tokenizer._sep_token] + tokenizer.encode(
+                history_text, add_special_tokens=False, truncation=True, max_length=max_query_length)
+        else:
+            truncated_history = []
+        if is_training and not example.is_impossible:
+            # Get start and end position
+            start_position = example.start_position
+            end_position = example.end_position
+
+            # If the answer cannot be found in the text, then skip this example.
+            actual_text = " ".join(example.doc_tokens[start_position: (end_position + 1)])
+            cleaned_answer_text = " ".join(whitespace_tokenize(example.answer_text))
+            if actual_text.find(cleaned_answer_text) == -1:
+                logging.warning("Could not find answer: '%s' vs. '%s'", actual_text, cleaned_answer_text)
+                return []
+
+        tok_to_orig_index = []
+        orig_to_tok_index = []
+        all_doc_tokens = []
+        for (i, token) in enumerate(example.doc_tokens):
+            orig_to_tok_index.append(len(all_doc_tokens))
+            sub_tokens = tokenizer.tokenize(token)
+            for sub_token in sub_tokens:
+                tok_to_orig_index.append(i)
+                all_doc_tokens.append(sub_token)
+
+        if is_training and not example.is_impossible:
+            tok_start_position = orig_to_tok_index[example.start_position]
+            if example.end_position < len(example.doc_tokens) - 1:
+                tok_end_position = orig_to_tok_index[example.end_position + 1] - 1
+            else:
+                tok_end_position = len(all_doc_tokens) - 1
+
+            (tok_start_position, tok_end_position) = _improve_answer_span(
+                all_doc_tokens, tok_start_position, tok_end_position, tokenizer, example.answer_text
+            )
+
+        spans = []
+
+        truncated_query = tokenizer.encode(
+            example.question_text, add_special_tokens=False, truncation=True, max_length=max_query_length
+        )
+
+        # Tokenizers who insert 2 SEP tokens in-between <context> & <question> need to have special handling
+        # in the way they compute mask of added tokens.
+        tokenizer_type = type(tokenizer).__name__.replace("Tokenizer", "").lower()
+        sequence_added_tokens = (
+            tokenizer.model_max_length - tokenizer.max_len_single_sentence + 1
+            if tokenizer_type in MULTI_SEP_TOKENS_TOKENIZERS_SET
+            else tokenizer.model_max_length - tokenizer.max_len_single_sentence
+        )
+        sequence_pair_added_tokens = tokenizer.model_max_length - tokenizer.max_len_sentences_pair
+        span_doc_tokens = all_doc_tokens
+        while len(spans) * doc_stride < len(all_doc_tokens):
+
+            # Define the side we want to truncate / pad and the text/pair sorting
+            if tokenizer.padding_side == "right":
+                texts = truncated_query
+                pairs = span_doc_tokens
+                truncation = TruncationStrategy.ONLY_SECOND.value
+            else:
+                texts = span_doc_tokens
+                pairs = truncated_query
+                truncation = TruncationStrategy.ONLY_FIRST.value
+
+            encoded_dict = tokenizer.encode_plus(
+                texts,
+                pairs,
+                truncation=truncation,
+                padding=padding_strategy,
+                max_length=max_seq_length,
+                return_overflowing_tokens=True,
+                stride=max_seq_length - doc_stride - len(truncated_query) - sequence_pair_added_tokens,
+                return_token_type_ids=True,
+            )
+
+            paragraph_len = min(
+                len(all_doc_tokens) - len(spans) * doc_stride,
+                max_seq_length - len(truncated_query) - sequence_pair_added_tokens,
+            )
+            if len(truncated_history) > 0:
+                if tokenizer.pad_token_id in encoded_dict["input_ids"]:
+                    content_end_index = encoded_dict["input_ids"].index(tokenizer.pad_token_id)
+                    history_end_index = min(content_end_index + len(truncated_history), max_seq_length)
+                    encoded_dict["input_ids"][content_end_index:history_end_index] = truncated_history
+                    encoded_dict["token_type_ids"][content_end_index:history_end_index] = torch.LongTensor(
+                        [1] * len(truncated_history))
+                    encoded_dict["attention_mask"][content_end_index:history_end_index] = torch.LongTensor(
+                        [1] * len(truncated_history))
+                else:
+                    encoded_dict["input_ids"][-len(truncated_history):] = truncated_history
+
+            if tokenizer.pad_token_id in encoded_dict["input_ids"]:
+                if tokenizer.padding_side == "right":
+                    non_padded_ids = encoded_dict["input_ids"][
+                                     : encoded_dict["input_ids"].index(tokenizer.pad_token_id)]
+                else:
+                    last_padding_id_position = (
+                            len(encoded_dict["input_ids"]) - 1 - encoded_dict["input_ids"][::-1].index(
+                        tokenizer.pad_token_id)
+                    )
+                    non_padded_ids = encoded_dict["input_ids"][last_padding_id_position + 1:]
+            else:
+                non_padded_ids = encoded_dict["input_ids"]
+
+            tokens = tokenizer.convert_ids_to_tokens(non_padded_ids)
+
+            token_to_orig_map = {}
+            for i in range(paragraph_len):
+                index = len(truncated_query) + sequence_added_tokens + i if tokenizer.padding_side == "right" else i
+                token_to_orig_map[index] = tok_to_orig_index[len(spans) * doc_stride + i]
+
+            encoded_dict["paragraph_len"] = paragraph_len
+            encoded_dict["tokens"] = tokens
+            encoded_dict["token_to_orig_map"] = token_to_orig_map
+            encoded_dict["truncated_query_with_special_tokens_length"] = len(truncated_query) + sequence_added_tokens
+            encoded_dict["truncated_history_with_special_tokens_length"] = len(truncated_history)
+            encoded_dict["token_is_max_context"] = {}
+            encoded_dict["start"] = len(spans) * doc_stride
+            encoded_dict["length"] = paragraph_len
+
+            spans.append(encoded_dict)
+
+            if "overflowing_tokens" not in encoded_dict or (
+                    "overflowing_tokens" in encoded_dict and len(encoded_dict["overflowing_tokens"]) == 0
+            ):
+                break
+            span_doc_tokens = encoded_dict["overflowing_tokens"]
+
+        for doc_span_index in range(len(spans)):
+            for j in range(spans[doc_span_index]["paragraph_len"]):
+                is_max_context = _new_check_is_max_context(spans, doc_span_index, doc_span_index * doc_stride + j)
+                index = (
+                    j
+                    if tokenizer.padding_side == "left"
+                    else spans[doc_span_index]["truncated_query_with_special_tokens_length"] + j
+                )
+                spans[doc_span_index]["token_is_max_context"][index] = is_max_context
+
+        for span in spans:
+            # Identify the position of the CLS token
+            cls_index = span["input_ids"].index(tokenizer.cls_token_id)
+
+            # p_mask: mask with 1 for token than cannot be in the answer (0 for token which can be in an answer)
+            # Original TF implem also keep the classification token (set to 0)
+            p_mask = np.ones_like(span["token_type_ids"])
+            if tokenizer.padding_side == "right":
+                p_mask[len(truncated_query) + sequence_added_tokens:] = 0
+            else:
+                p_mask[-len(span["tokens"]): -(len(truncated_query) + sequence_added_tokens)] = 0
+
+            pad_token_indices = np.where(span["input_ids"] == tokenizer.pad_token_id)
+            special_token_indices = np.asarray(
+                tokenizer.get_special_tokens_mask(span["input_ids"], already_has_special_tokens=True)
+            ).nonzero()
+
+            p_mask[pad_token_indices] = 1
+            p_mask[special_token_indices] = 1
+
+            # Set the cls index to 0: the CLS index can be used for impossible answers
+            p_mask[cls_index] = 0
+
+            span_is_impossible = example.is_impossible
+            start_position = 0
+            end_position = 0
+            if is_training and not span_is_impossible:
+                # For training, if our document chunk does not contain an annotation
+                # we throw it out, since there is nothing to predict.
+                doc_start = span["start"]
+                doc_end = span["start"] + span["length"] - 1
+                out_of_span = False
+
+                if not (tok_start_position >= doc_start and tok_end_position <= doc_end):
+                    out_of_span = True
+
+                if out_of_span:
+                    start_position = cls_index
+                    end_position = cls_index
+                    span_is_impossible = True
+                else:
+                    if tokenizer.padding_side == "left":
+                        doc_offset = 0
+                    else:
+                        doc_offset = len(truncated_query) + sequence_added_tokens
+
+                    start_position = tok_start_position - doc_start + doc_offset
+                    end_position = tok_end_position - doc_start + doc_offset
+
+            features.append(
+                SquadFeatures(
+                    span["input_ids"],
+                    span["attention_mask"],
+                    span["token_type_ids"],
+                    cls_index,
+                    p_mask.tolist(),
+                    example_index=0,
+                    # Can not set unique_id and example_index here. They will be set after multiple processing.
+                    unique_id=0,
+                    paragraph_len=span["paragraph_len"],
+                    token_is_max_context=span["token_is_max_context"],
+                    tokens=span["tokens"],
+                    token_to_orig_map=span["token_to_orig_map"],
+                    start_position=start_position,
+                    end_position=end_position,
+                    is_impossible=span_is_impossible,
+                    qas_id=example.qas_id,
+                )
+            )
+        return features
 
     # Tokenize our training dataset
     def _set_text_vec(self, obs, history, truncate, is_training=True):
         # Tokenize contexts and questions (as pairs of inputs)
-        if 'text' not in obs:
+        if 'squad_example' not in obs:
             return obs
-        start_positions = []
-        end_positions = []
-        ans_text = obs.get('single_label_text', None)
-        history_text = self.truncate_with_dic(" ".join(history.history_strings[:-1]), self.history_truncate, latest=True)
-        question_text = self.truncate_with_dic(obs['question_text'], self.query_truncate)
-        query_tokens = self.dict.tokenizer.tokenize(question_text)
-        # The -3 accounts for [CLS], [SEP] and [SEP] and [SEP]
-        max_tokens_for_doc = self.truncate - len(query_tokens) - self.history_truncate - 4
-        context_encodings = self.dict.tokenizer.encode_plus(obs['context'], add_special_tokens=False)
-        all_doc_tokens = context_encodings['input_ids']
-        if is_training and obs['is_impossible']:
-            tok_start_position = -1
-            tok_end_position = -1
-        elif is_training :
-            start_idx, end_idx = util.get_correct_alignement(obs['context'], obs['single_label_text'],
-                                                             int(obs['char_answer_start']))
-            if context_encodings._encodings:
-                tok_start_position = context_encodings.char_to_token(start_idx)
-                tok_end_position = context_encodings.char_to_token(end_idx)
-            if tok_start_position is None or tok_end_position is None:
-                tok_start_position, tok_end_position, _ = self.get_token_start_end_position(context_encodings,
-                                                                                         ans_text,
-                                                                                         start_idx)
-
-        # We can have documents that are longer than the maximum sequence length.
-        # To deal with this we do a sliding window approach, where we take chunks
-        # of the up to our max length with a stride of `doc_stride`.
-        _DocSpan = collections.namedtuple(  # pylint: disable=invalid-name
-            "DocSpan", ["start", "length"])
-        doc_spans = []
-        start_offset = 0
-        while start_offset < len(all_doc_tokens):
-            length = len(all_doc_tokens) - start_offset
-            if length > max_tokens_for_doc:
-                length = max_tokens_for_doc
-            doc_spans.append(_DocSpan(start=start_offset, length=length))
-            if start_offset + length == len(all_doc_tokens):
-                break
-            start_offset += min(length, self.doc_stride)
-
-        question_texts = []
-        context_texts = []
-        text_vecs = []
-
-        if len(doc_spans) > 1:
-            logging.info('Chuncking document with {} tokens shift into {} documents'.format(self.doc_stride, len(doc_spans)))
-        for (doc_span_index, doc_span) in enumerate(doc_spans):
-            # context_tokens = all_doc_tokens[doc_span[0]:doc_span[1]]
-            context_text = self.dict.tokenizer.decode(context_encodings['input_ids'][doc_span[0]: doc_span[0]+doc_span[1]])
-            if history_text:
-                context_text = context_text + " " + history_text
-
-            start_position = None
-            end_position = None
-            if is_training and not obs['is_impossible']:
-                # For training, if our document chunk does not contain an annotation
-                # we throw it out, since there is nothing to predict.
-                doc_start = doc_span.start
-                doc_end = doc_span.start + doc_span.length
-                out_of_span = False
-                if not (tok_start_position >= doc_start and
-                        tok_end_position <= doc_end):
-                    out_of_span = True
-                if out_of_span:
-                    start_position = 0
-                    end_position = 0
-                else:
-                    doc_offset = len(query_tokens) + self.dict.QA_SPECIAL_TOKENS_OFFSET
-                    start_position = tok_start_position - doc_start + doc_offset
-                    end_position = tok_end_position - doc_start + doc_offset
-
-            if is_training and obs['is_impossible']:
-                start_position = 0
-                end_position = 0
-            text_vec = self.dict.tokenizer.encode_plus(question_text, context_text,
-                                                        pad_to_max_length=True,
-                                                        add_special_tokens=True,
-                                                        padding=True,
-                                                        max_length=self.truncate,
-                                                        return_attention_mask=True,
-                                                        truncation=True,
-                                                        return_tensors='pt')['input_ids'][0]
-            text_vecs.append(text_vec)
-            question_texts.append(question_text)
-            context_texts.append(context_text)
-            start_positions.append(start_position)
-            end_positions.append(end_position)
-
+        features = self.squad_convert_example_to_features(
+            example=obs['squad_example'],
+            max_seq_length=self.truncate,
+            doc_stride=self.doc_stride,
+            max_query_length=self.query_truncate,
+            padding_strategy="max_length",
+            is_training=is_training
+        )
+        obs['text_vec'] = features
         labels_with_special_tokens = []
         for l in obs.get('labels', obs.get('eval_labels', [])):
             if l == "":
                 labels_with_special_tokens.append(self.dict.cls_token)
             else:
                 labels_with_special_tokens.append(l)
-
-        full_text_dict ={'question_texts': question_texts, 'context_texts': context_texts}
-        obs['text_vec'] = text_vecs
-        obs['full_text_dict'] = full_text_dict
-        obs['answer_starts'] = start_positions
-        obs['answer_ends'] = end_positions
         if 'labels' in obs:
             obs.force_set('labels', labels_with_special_tokens)
         elif 'eval_labels' in obs:
             obs.force_set('eval_labels', labels_with_special_tokens)
         return obs
 
-    def batchify(self, obs_batch, sort=False):
 
+    def batchify(self, obs_batch, sort=False):
+        is_training = self.is_training
+        batch = Batch(batchsize=0)
         if len(obs_batch) == 0:
-            return Batch(batchsize=0)
+            return batch
 
         valid_obs = [(i, ex) for i, ex in enumerate(obs_batch) if self.is_valid(ex)]
 
         if len(valid_obs) == 0:
-            return Batch(batchsize=0)
+            return batch
         valid_inds, exs = zip(*valid_obs)
+        features = []
         batch_indexes_map = []
-        start_positions = []
-        end_positions = []
-        question_texts = []
-        context_texts = []
-        labels = []
-        label_vec = []
+        unique_id = 1000000000
         cur_index = 0
-        for i in valid_inds:
-            batch = obs_batch[i]
-            doc_indexes = []
-            start_positions.extend(batch['answer_starts'])
-            end_positions.extend(batch['answer_ends'])
-            labels.append(batch.get('labels', batch.get('eva_labels')))
-            label_vec.extend(batch['label_vec'])
-            question_texts.extend(batch['full_text_dict']['question_texts'])
-            context_texts.extend(batch['full_text_dict']['context_texts'])
-            doc_num = len(batch['answer_starts'])
-            for _ in range(doc_num):
-                doc_indexes.append(cur_index)
+        for example_index, example in valid_obs:
+            cur_ex_docs = []
+            example_features = example.get('text_vec', None)
+            if not example_features:
+                continue
+            for example_feature in example_features:
+                example_feature.example_index = example_index
+                example_feature.unique_id = unique_id
+                features.append(example_feature)
+                cur_ex_docs.append(cur_index)
+                unique_id += 1
                 cur_index += 1
-            batch_indexes_map.append(doc_indexes)
+            example_index += 1
+            batch_indexes_map.append(cur_ex_docs)
 
-        encodings = self.dict.tokenizer(question_texts, context_texts,
-                                        pad_to_max_length=True,
-                                        add_special_tokens=True,
-                                        padding=True,
-                                        max_length=self.truncate,
-                                        return_attention_mask=True,
-                                        truncation=True,
-                                        return_tensors='pt')
-        start_positions = torch.LongTensor(start_positions)
-        end_positions = torch.LongTensor(end_positions)
-        # xs, x_lens = self._pad_tensor(xs)
-        # label_vec, label_vec_len = self._pad_tensor(label_vec)
-        # ys, y_lens = start_positions, len(start_positions)
+        # Convert to Tensors and build dataset
+        all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
+        all_attention_masks = torch.tensor([f.attention_mask for f in features], dtype=torch.long)
+        all_token_type_ids = torch.tensor([f.token_type_ids for f in features], dtype=torch.long)
+        all_cls_index = torch.tensor([f.cls_index for f in features], dtype=torch.long)
+        all_p_mask = torch.tensor([f.p_mask for f in features], dtype=torch.float)
+        all_is_impossible = torch.tensor([f.is_impossible for f in features], dtype=torch.float)
 
-        if self.use_cuda:
-            start_positions = start_positions.cuda()
-            end_positions = end_positions.cuda()
-            for k, vector in encodings.items():
-                encodings[k] = encodings[k].cuda()
+        all_feature_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
+        all_start_positions = torch.tensor([f.start_position for f in features], dtype=torch.long)
+        all_end_positions = torch.tensor([f.end_position for f in features], dtype=torch.long)
 
-        return Batch(
-            batchsize=len(valid_inds),
-            encoding=encodings,
-            label_vec=label_vec,
-            labels_text=labels,
-            valid_indices=valid_inds,
-            observations=exs,
-            start_positions=start_positions,
-            end_positions=end_positions,
+        batch = Batch(
+            batchsize=len(valid_obs),
+            no_answer_reply=obs_batch[0].get('no_answer_reply', self.dict.cls_token),
+            text_vec=all_input_ids,
+            attention_mask=all_attention_masks,
+            token_type_ids=all_token_type_ids,
+            start_positions=all_start_positions,
+            end_positions=all_end_positions,
+            cls_index=all_cls_index,
+            p_mask=all_p_mask,
+            is_impossible=all_is_impossible,
+            features_index=all_feature_index,
             batch_indexes_map=batch_indexes_map,
-            no_answer_reply=obs_batch[0].get('no_answer_reply', self.dict.cls_token)
+            valid_indices=valid_inds,
         )
+        if self.use_cuda:
+            batch.text_vec = batch.text_vec.cuda()
+            batch.attention_mask = batch.attention_mask.cuda()
+            batch.token_type_ids = batch.token_type_ids.cuda()
+            batch.start_positions = batch.start_positions.cuda()
+            batch.end_positions = batch.end_positions.cuda()
+
+        return batch
+
+        # return Batch(
+        #     batchsize=len(valid_inds),
+        #     encoding=encodings,
+        #     label_vec=label_vec,
+        #     labels_text=labels,
+        #     valid_indices=valid_inds,
+        #     observations=exs,
+        #     start_positions=start_positions,
+        #     end_positions=end_positions,
+        #     batch_indexes_map=batch_indexes_map,
+        #     no_answer_reply=obs_batch[0].get('no_answer_reply', self.dict.cls_token)
+        # )
+
+
+
+
+        # batch_indexes_map = []
+        # start_positions = []
+        # end_positions = []
+        # question_texts = []
+        # context_texts = []
+        # labels = []
+        # label_vec = []
+        # cur_index = 0
+        # for i in valid_inds:
+        #     batch = obs_batch[i]
+        #     doc_indexes = []
+        #     start_positions.extend(batch['answer_starts'])
+        #     end_positions.extend(batch['answer_ends'])
+        #     labels.append(batch.get('labels', batch.get('eva_labels')))
+        #     label_vec.extend(batch['label_vec'])
+        #     question_texts.extend(batch['full_text_dict']['question_texts'])
+        #     context_texts.extend(batch['full_text_dict']['context_texts'])
+        #     doc_num = len(batch['answer_starts'])
+        #     for _ in range(doc_num):
+        #         doc_indexes.append(cur_index)
+        #         cur_index += 1
+        #     batch_indexes_map.append(doc_indexes)
+        #
+        # encodings = self.dict.tokenizer(question_texts, context_texts,
+        #                                 pad_to_max_length=True,
+        #                                 add_special_tokens=True,
+        #                                 padding=True,
+        #                                 max_length=self.truncate,
+        #                                 return_attention_mask=True,
+        #                                 truncation=True,
+        #                                 return_tensors='pt')
+        # start_positions = torch.LongTensor(start_positions)
+        # end_positions = torch.LongTensor(end_positions)
+        # # xs, x_lens = self._pad_tensor(xs)
+        # # label_vec, label_vec_len = self._pad_tensor(label_vec)
+        # # ys, y_lens = start_positions, len(start_positions)
+        #
+
+        #
+        # return Batch(
+        #     batchsize=len(valid_inds),
+        #     encoding=encodings,
+        #     label_vec=label_vec,
+        #     labels_text=labels,
+        #     valid_indices=valid_inds,
+        #     observations=exs,
+        #     start_positions=start_positions,
+        #     end_positions=end_positions,
+        #     batch_indexes_map=batch_indexes_map,
+        #     no_answer_reply=obs_batch[0].get('no_answer_reply', self.dict.cls_token)
+        # )
 
     def _pad_tensor(self, items):
         """
@@ -637,7 +859,23 @@ class TorchSpanAgent(TorchAgent):
         """
         Override to pass in text lengths.
         """
-        return (batch.encoding)
+        inputs = {
+            "input_ids": batch["text_vec"],
+            "attention_mask": batch["attention_mask"],
+            "token_type_ids": batch["token_type_ids"],
+            "start_positions": batch["start_positions"],
+            "end_positions": batch["end_positions"],
+        }
+        if self.model.model_type in ["xlm", "roberta", "distilbert", "camembert", "bart", "longformer"]:
+            del inputs["token_type_ids"]
+        if self.model.model_type in ["xlnet", "xlm"]:
+            if self.use_cuda:
+                inputs.update({"cls_index": batch["cls_index"].cuda(), "p_mask": batch["p_mask"].cuda(),
+                               "is_impossible": batch["is_impossible"].cuda()})
+            else:
+                inputs.update({"cls_index": batch["cls_index"], "p_mask": batch["p_mask"],
+                               "is_impossible": batch["is_impossible"]})
+        return inputs
 
     def _encoder_input(self, batch):
         return (batch.text_vec)
@@ -679,22 +917,6 @@ class TorchSpanAgent(TorchAgent):
             return " ".join(tokens_in_range)
         else:
             return ""
-
-    def get_char_to_word_offset(self, text):
-        doc_tokens = []
-        char_to_word_offset = []
-        prev_is_whitespace = True
-        for c in text:
-            if is_whitespace(c):
-                prev_is_whitespace = True
-            else:
-                if prev_is_whitespace:
-                    doc_tokens.append(c)
-                else:
-                    doc_tokens[-1] += c
-                prev_is_whitespace = False
-            char_to_word_offset.append(len(doc_tokens) - 1)
-        return char_to_word_offset
 
     # a shifting window size function that aims to find the start end indx for the max f1 score sequence in the context
     def get_token_start_end_position(self, context_encoding, answer_text, start_char, offset_allowance=50):

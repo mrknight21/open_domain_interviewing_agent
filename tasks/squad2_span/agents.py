@@ -1,6 +1,7 @@
 
 from parlai.tasks.squad2.agents import IndexTeacher
 from parlai_internal.utilities import util
+from transformers.data.processors.squad import SquadExample
 
 import copy
 
@@ -13,63 +14,46 @@ class DefaultTeacher(IndexTeacher):
         super().__init__(opt, shared)
 
     def get(self, episode_idx, entry_idx=None):
+        is_training = self.datatype == "train"
         article_idx, paragraph_idx, qa_idx = self.examples[episode_idx]
         article = self.squad[article_idx]
         paragraph = article['paragraphs'][paragraph_idx]
-        paragraph_text = paragraph["context"]
-        doc_tokens, char_to_word_offset = util.build_char_word_offset_list(paragraph)
+        context_text = paragraph["context"]
         qa = paragraph["qas"][qa_idx]
         qas_id = qa["id"]
         question_text = qa["question"]
-        start_position = None
-        end_position = None
-        orig_answer_text = None
-        is_impossible = False
-        is_impossible = qa["is_impossible"]
+        start_position_character = None
+        answer_text = None
+        answers = []
+        is_impossible = qa.get("is_impossible", False)
         if not is_impossible:
             answer = qa["answers"][0]
-            orig_answer_text = answer["text"]
-            answer_offset = answer["answer_start"]
-            answer_length = len(orig_answer_text)
-            start_position = char_to_word_offset[answer_offset]
-            end_position = char_to_word_offset[answer_offset + answer_length -
-                                               1]
-            # Only add answers where the text can be exactly recovered from the
-            # document. If this CAN'T happen it's likely due to weird Unicode
-            # stuff so we will just skip the example.
-            #
-            # Note that this means for training mode, every example is NOT
-            # guaranteed to be preserved.
-            actual_text = " ".join(
-                doc_tokens[start_position:(end_position + 1)])
-            cleaned_answer_text = " ".join(
-                util.whitespace_tokenize(orig_answer_text))
-            eva_labels_text = [ans['text'] for ans in qa["answers"]]
-            if actual_text.find(cleaned_answer_text) == -1:
-                print("Could not find answer: '%s' vs. '%s'",
-                                   actual_text, cleaned_answer_text)
-                return None
+            answer_text = answer["text"]
+            start_position_character = answer["answer_start"]
+            answers = [qa['text'] for qa in qa["answers"]]
         else:
-            start_position = -1
-            end_position = -1
-            orig_answer_text = ""
-            eva_labels_text = [NO_ANSWER_REPLY]
+            answers = [NO_ANSWER_REPLY]
 
-
+        squad_example = SquadExample(
+                        qas_id=qas_id,
+                        question_text=question_text,
+                        context_text=context_text,
+                        answer_text=answer_text,
+                        start_position_character=start_position_character,
+                        title="unknown title",
+                        is_impossible=is_impossible,
+                        answers=answers,
+                    )
 
         action = {
             'id': 'squad',
             'qas_id': qas_id,
-            'text': paragraph_text + ' [SEP] ' + question_text,
-            'doc_tokens': doc_tokens,
-            'context': paragraph_text,
-            'question_text': question_text,
-            'labels': eva_labels_text,
-            'single_label_text': orig_answer_text,
+            'labels': answers,
+            'squad_example': squad_example,
+            'single_label_text': answer_text,
             'episode_done': True,
-            'start_position': start_position,
-            'end_position': end_position,
-            'is_impossible': is_impossible
+            'is_impossible': is_impossible,
+            'no_answer_reply': NO_ANSWER_REPLY
         }
         return action
 

@@ -13,20 +13,30 @@ SPECIAL_TOKENS = {"unk_token": "[UNK]", "sep_token": "[SEP]",
                   "pad_token": "[PAD]", "cls_token": "[CLS]",
                   "mask_token": "[MASK]"}
 
-class BertEncoder(torch.nn.Module):
+# class BertEncoder(torch.nn.Module):
+#     """
+#         Bert Encoder.
+#
+#         This encoder is initialized with the pretrained model from Hugging Face.
+#         """
+#
+#     def __init__(self, opt, dict):
+#         super().__init__()
+#         self.transformer = self._init_from_pretrained(opt)
+#         self.use_cuda = not opt["no_cuda"] and torch.cuda.is_available()
+
+
+class HFBertQAModel(TorchExtractiveModel):
     """
-        Bert Encoder.
+    """
 
-        This encoder is initialized with the pretrained model from Hugging Face.
-        """
+    def __init__(self, opt):
 
-    def __init__(self, opt, dict):
-        super().__init__()
-        self.transformer = self._init_from_pretrained(opt)
-        self.use_cuda = not opt["no_cuda"] and torch.cuda.is_available()
+        # init the model
+        super().__init__(opt)
+        self.model_type = 'bert'
 
-
-    def _init_from_pretrained(self, opt):
+    def get_config_key(self, opt):
         # load model
         # check if datapath has the files that hugging face code looks for
         if all(
@@ -38,49 +48,7 @@ class BertEncoder(torch.nn.Module):
             fle_key = os.path.join(opt["datapath"], "models", "bert_hf")
         else:
             fle_key = opt["bert_type"]
-        return BertModel.from_pretrained(fle_key)
-
-class HFBertQAModel(TorchExtractiveModel):
-    """
-    """
-
-    def __init__(self, opt, dict):
-
-        # init the model
-        super().__init__()
-        self.encoder = BertEncoder(opt, dict)
-        self.config = self.encoder.transformer.config
-        self.hidden_size = self.config.hidden_size
-        self.qa_outputs = nn.Linear(self.encoder.transformer.config.hidden_size, self.num_labels)
-
-    def output(self, tensor):
-        """
-        Compute output logits.
-
-        Because we concatenate the context with the labels using the
-        `concat_without_padding` function, we must truncate the input tensor to return
-        only the scores for the label tokens.
-        """
-        # get only scores for labels
-        if self.text_lengths is not None:
-            total_length = max(self.text_lengths)
-            to_select = tensor.size(1) - total_length
-            if not self.add_start_token:
-                to_select = to_select + 1
-            if to_select > 0:
-                # select only label scores
-                bsz = tensor.size(0)
-                new_tensors = []
-                for i in range(bsz):
-                    start = self.text_lengths[i]
-                    if not self.add_start_token:
-                        start = start - 1
-                    end = start + to_select
-                    new_tensors.append(tensor[i : i + 1, start:end, :])
-                tensor = torch.cat(new_tensors, 0)
-
-        return self.lm_head(tensor)
-
+        return fle_key
 
 class BertDictionaryAgent(HuggingFaceDictionaryAgent):
     # '[CLS]' and '[SEP]'
@@ -186,7 +154,7 @@ class BertQaAgent(TorchSpanAgent):
         """
         Build and return model.
         """
-        return HFBertQAModel(self.opt, self.dict)
+        return HFBertQAModel(self.opt)
 
 
 

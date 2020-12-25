@@ -80,6 +80,8 @@ class HFLongformerQAModel(TorchExtractiveModel):
 
 
 class LongformerDictionaryAgent(HuggingFaceDictionaryAgent):
+    QA_SPECIAL_TOKENS_OFFSET = 3
+
     def is_prebuilt(self):
         """
         Indicates whether the dictionary is fixed, and does not require building.
@@ -160,7 +162,7 @@ class LongformerQaAgent(TorchSpanAgent):
             "--longformer-type",
             type=str,
             default="allenai/longformer-base-4096",
-            choices=["allenai/longformer-base-4096", "allenai/longformer-large-4096"],
+            choices=["allenai/longformer-base-4096", "allenai/longformer-large-4096", "mrm8488/longformer-base-4096-finetuned-squadv2"],
             help="Which size model to initialize.",
         )
         agent.add_argument(
@@ -190,7 +192,7 @@ class LongformerQaAgent(TorchSpanAgent):
         self.context_truncate = opt['context_maximum_length']
         self.history_truncate = opt['history_maximum_length']
         self.truncate = self.dict.tokenizer.max_len
-        self.doc_stride = self.truncate
+        self.doc_stride = self.context_truncate
 
     @staticmethod
     def dictionary_class():
@@ -208,107 +210,107 @@ class LongformerQaAgent(TorchSpanAgent):
         return HFLongformerQAModel(self.opt, self.dict)
 
     # Tokenize our training dataset
-    def _set_text_vec(self, obs, history, truncate, is_training=True):
-        # Tokenize contexts and questions (as pairs of inputs)
-        if 'text' not in obs:
-            return obs
-        # The -3 accounts for [CLS], [SEP] and [SEP] and [SEP]
-
-        start_positions = []
-        end_positions = []
-        tok_to_orig_index = []
-        orig_to_tok_index = []
-        all_doc_tokens = self.dict.tokenizer.tokenize(obs['context'])
-        context_encodings = self.dict.tokenizer.encode_plus(obs['context'])
-        ans_text = obs.get('single_label_text', None)
-        history_text = self.truncate_with_dic(" ".join(history.history_strings[:-1]), self.history_truncate, latest=True)
-        question_text = self.truncate_with_dic(obs['question_text'], self.query_truncate)
-        query_tokens = self.dict.tokenizer.tokenize(question_text)
-        # The -3 accounts for special tokens
-        max_tokens_for_doc = self.truncate - len(query_tokens) - self.history_truncate - 4
-        if is_training and obs['is_impossible']:
-            tok_start_position = -1
-            tok_end_position = -1
-        elif is_training:
-            start_idx, end_idx = self.get_correct_alignement(obs['context'], obs['single_label_text'],
-                                                             int(obs['char_answer_start']))
-            tok_start_position = context_encodings.char_to_token(start_idx)
-            tok_end_position = context_encodings.char_to_token(end_idx-1)
-        if tok_start_position is None or tok_end_position is None:
-            print('no start')
-            tok_start_position = -1
-            tok_end_position = -1
-        question_texts = []
-        context_texts = []
-        text_vecs = []
-
-        # We can have documents that are longer than the maximum sequence length.
-        # To deal with this we do a sliding window approach, where we take chunks
-        # of the up to our max length with a stride of `doc_stride`.
-        _DocSpan = collections.namedtuple(  # pylint: disable=invalid-name
-            "DocSpan", ["start", "length"])
-        doc_spans = []
-        start_offset = 0
-        while start_offset < len(all_doc_tokens):
-            length = len(all_doc_tokens) - start_offset
-            if length > max_tokens_for_doc:
-                length = max_tokens_for_doc
-            doc_spans.append(_DocSpan(start=start_offset, length=length))
-            if start_offset + length == len(all_doc_tokens):
-                break
-            start_offset += min(length, self.doc_stride)
-
-        if len(doc_spans) > 1:
-            logging.info('Chuncking document with {} tokens shift'.format(self.doc_stride))
-        for (doc_span_index, doc_span) in enumerate(doc_spans):
-            # context_tokens = all_doc_tokens[doc_span[0]:doc_span[1]]
-            context_text = self.slice_text_with_token_index(obs['context'], doc_span[0], doc_span[1])
-            if history_text:
-                context_text = context_text + " " + history_text
-
-            start_position = None
-            end_position = None
-            if is_training and not obs['is_impossible']:
-                # For training, if our document chunk does not contain an annotation
-                # we throw it out, since there is nothing to predict.
-                doc_start = doc_span.start
-                doc_end = doc_span.start + doc_span.length - 1
-                out_of_span = False
-                if not (tok_start_position >= doc_start and
-                        tok_end_position <= doc_end):
-                    out_of_span = True
-                if out_of_span:
-                    start_position = 0
-                    end_position = 0
-                else:
-                    doc_offset = len(query_tokens) + 2
-                    start_position = tok_start_position - doc_start + doc_offset
-                    end_position = tok_end_position - doc_start + doc_offset
-
-            if is_training and obs['is_impossible']:
-                start_position = 0
-                end_position = 0
-            text_vec = self.dict.tokenizer.encode_plus(question_text, context_text,
-                                                        pad_to_max_length=True,
-                                                        add_special_tokens=True,
-                                                        padding=True,
-                                                        max_length=self.truncate,
-                                                        return_attention_mask=True,
-                                                        truncation=True,
-                                                        return_tensors='pt')['input_ids'][0]
-            text_vecs.append(text_vec)
-            question_texts.append(question_text)
-            context_texts.append(context_text)
-            start_positions.append(start_position)
-            end_positions.append(end_position)
-
-        full_text_dict ={'question_texts': question_texts, 'context_texts': context_texts}
-
-        obs['text_vec'] = text_vecs
-        obs['full_text_dict'] = full_text_dict
-        obs['answer_starts'] = start_positions
-        obs['answer_ends'] = end_positions
-        return obs
+    # def _set_text_vec(self, obs, history, truncate, is_training=True):
+    #     # Tokenize contexts and questions (as pairs of inputs)
+    #     if 'text' not in obs:
+    #         return obs
+    #     # The -3 accounts for [CLS], [SEP] and [SEP] and [SEP]
+    #
+    #     start_positions = []
+    #     end_positions = []
+    #     tok_to_orig_index = []
+    #     orig_to_tok_index = []
+    #     all_doc_tokens = self.dict.tokenizer.tokenize(obs['context'])
+    #     context_encodings = self.dict.tokenizer.encode_plus(obs['context'])
+    #     ans_text = obs.get('single_label_text', None)
+    #     history_text = self.truncate_with_dic(" ".join(history.history_strings[:-1]), self.history_truncate, latest=True)
+    #     question_text = self.truncate_with_dic(obs['question_text'], self.query_truncate)
+    #     query_tokens = self.dict.tokenizer.tokenize(question_text)
+    #     # The -3 accounts for special tokens
+    #     max_tokens_for_doc = self.truncate - len(query_tokens) - self.history_truncate - 4
+    #     if is_training and obs['is_impossible']:
+    #         tok_start_position = -1
+    #         tok_end_position = -1
+    #     elif is_training:
+    #         start_idx, end_idx = self.get_correct_alignement(obs['context'], obs['single_label_text'],
+    #                                                          int(obs['char_answer_start']))
+    #         tok_start_position = context_encodings.char_to_token(start_idx)
+    #         tok_end_position = context_encodings.char_to_token(end_idx-1)
+    #     if tok_start_position is None or tok_end_position is None:
+    #         print('no start')
+    #         tok_start_position = -1
+    #         tok_end_position = -1
+    #     question_texts = []
+    #     context_texts = []
+    #     text_vecs = []
+    #
+    #     # We can have documents that are longer than the maximum sequence length.
+    #     # To deal with this we do a sliding window approach, where we take chunks
+    #     # of the up to our max length with a stride of `doc_stride`.
+    #     _DocSpan = collections.namedtuple(  # pylint: disable=invalid-name
+    #         "DocSpan", ["start", "length"])
+    #     doc_spans = []
+    #     start_offset = 0
+    #     while start_offset < len(all_doc_tokens):
+    #         length = len(all_doc_tokens) - start_offset
+    #         if length > max_tokens_for_doc:
+    #             length = max_tokens_for_doc
+    #         doc_spans.append(_DocSpan(start=start_offset, length=length))
+    #         if start_offset + length == len(all_doc_tokens):
+    #             break
+    #         start_offset += min(length, self.doc_stride)
+    #
+    #     if len(doc_spans) > 1:
+    #         logging.info('Chuncking document with {} tokens shift'.format(self.doc_stride))
+    #     for (doc_span_index, doc_span) in enumerate(doc_spans):
+    #         # context_tokens = all_doc_tokens[doc_span[0]:doc_span[1]]
+    #         context_text = self.slice_text_with_token_index(obs['context'], doc_span[0], doc_span[1])
+    #         if history_text:
+    #             context_text = context_text + " " + history_text
+    #
+    #         start_position = None
+    #         end_position = None
+    #         if is_training and not obs['is_impossible']:
+    #             # For training, if our document chunk does not contain an annotation
+    #             # we throw it out, since there is nothing to predict.
+    #             doc_start = doc_span.start
+    #             doc_end = doc_span.start + doc_span.length - 1
+    #             out_of_span = False
+    #             if not (tok_start_position >= doc_start and
+    #                     tok_end_position <= doc_end):
+    #                 out_of_span = True
+    #             if out_of_span:
+    #                 start_position = 0
+    #                 end_position = 0
+    #             else:
+    #                 doc_offset = len(query_tokens) + 2
+    #                 start_position = tok_start_position - doc_start + doc_offset
+    #                 end_position = tok_end_position - doc_start + doc_offset
+    #
+    #         if is_training and obs['is_impossible']:
+    #             start_position = 0
+    #             end_position = 0
+    #         text_vec = self.dict.tokenizer.encode_plus(question_text, context_text,
+    #                                                     pad_to_max_length=True,
+    #                                                     add_special_tokens=True,
+    #                                                     padding=True,
+    #                                                     max_length=self.truncate,
+    #                                                     return_attention_mask=True,
+    #                                                     truncation=True,
+    #                                                     return_tensors='pt')['input_ids'][0]
+    #         text_vecs.append(text_vec)
+    #         question_texts.append(question_text)
+    #         context_texts.append(context_text)
+    #         start_positions.append(start_position)
+    #         end_positions.append(end_position)
+    #
+    #     full_text_dict ={'question_texts': question_texts, 'context_texts': context_texts}
+    #
+    #     obs['text_vec'] = text_vecs
+    #     obs['full_text_dict'] = full_text_dict
+    #     obs['answer_starts'] = start_positions
+    #     obs['answer_ends'] = end_positions
+    #     return obs
 
 
     # Tokenize our training dataset
