@@ -297,8 +297,8 @@ class TorchSpanAgent(TorchAgent):
             start_logits, end_logits= output['start_logits'].detach().cpu(), output['end_logits'].detach().cpu()
             # total_loss = output['loss']
             # start_logits, end_logits, sequence_output = self.model(self._model_input(batch))
-            start_positions = batch.get('start_positions', None)
-            end_positions = batch.get('end_positions', None)
+            # start_positions = batch.get('start_positions', None)
+            # end_positions = batch.get('end_positions', None)
             output_start_positions, output_end_positions = torch.argmax(start_logits, dim=1), torch.argmax(end_logits, dim=1)
             end_start_pairs = torch.stack((output_start_positions, output_end_positions), dim=1).cpu().data.numpy()
             output_text = []
@@ -320,10 +320,10 @@ class TorchSpanAgent(TorchAgent):
                 else:
                     output_text.append(no_answer_reply)
 
-            losses = []
-            start_losses = []
-            end_losses = []
-            correct_span_nums = []
+            # losses = []
+            # start_losses = []
+            # end_losses = []
+            # correct_span_nums = []
             if batch.get('start_positions', None) is not None:
                 # start_positions = start_positions.detach().cpu()
                 # end_positions = end_positions.detach().cpu()
@@ -338,7 +338,7 @@ class TorchSpanAgent(TorchAgent):
                 # start_positions.clamp_(0, ignored_index)
                 # end_positions.clamp_(0, ignored_index)
                 for doc_indexes in batch['batch_indexes_map']:
-                    cur_loss = 0
+                    # cur_loss = 0
                     index_start, index_end = doc_indexes[0], doc_indexes[-1]+1
                     cur_output_tex = output_text[index_start: index_end]
                     cur_pair_conf = combined_pair_conf[index_start: index_end]
@@ -778,74 +778,6 @@ class TorchSpanAgent(TorchAgent):
             batch.end_positions = batch.end_positions.cuda()
 
         return batch
-
-        # return Batch(
-        #     batchsize=len(valid_inds),
-        #     encoding=encodings,
-        #     label_vec=label_vec,
-        #     labels_text=labels,
-        #     valid_indices=valid_inds,
-        #     observations=exs,
-        #     start_positions=start_positions,
-        #     end_positions=end_positions,
-        #     batch_indexes_map=batch_indexes_map,
-        #     no_answer_reply=obs_batch[0].get('no_answer_reply', self.dict.cls_token)
-        # )
-
-
-
-
-        # batch_indexes_map = []
-        # start_positions = []
-        # end_positions = []
-        # question_texts = []
-        # context_texts = []
-        # labels = []
-        # label_vec = []
-        # cur_index = 0
-        # for i in valid_inds:
-        #     batch = obs_batch[i]
-        #     doc_indexes = []
-        #     start_positions.extend(batch['answer_starts'])
-        #     end_positions.extend(batch['answer_ends'])
-        #     labels.append(batch.get('labels', batch.get('eva_labels')))
-        #     label_vec.extend(batch['label_vec'])
-        #     question_texts.extend(batch['full_text_dict']['question_texts'])
-        #     context_texts.extend(batch['full_text_dict']['context_texts'])
-        #     doc_num = len(batch['answer_starts'])
-        #     for _ in range(doc_num):
-        #         doc_indexes.append(cur_index)
-        #         cur_index += 1
-        #     batch_indexes_map.append(doc_indexes)
-        #
-        # encodings = self.dict.tokenizer(question_texts, context_texts,
-        #                                 pad_to_max_length=True,
-        #                                 add_special_tokens=True,
-        #                                 padding=True,
-        #                                 max_length=self.truncate,
-        #                                 return_attention_mask=True,
-        #                                 truncation=True,
-        #                                 return_tensors='pt')
-        # start_positions = torch.LongTensor(start_positions)
-        # end_positions = torch.LongTensor(end_positions)
-        # # xs, x_lens = self._pad_tensor(xs)
-        # # label_vec, label_vec_len = self._pad_tensor(label_vec)
-        # # ys, y_lens = start_positions, len(start_positions)
-        #
-
-        #
-        # return Batch(
-        #     batchsize=len(valid_inds),
-        #     encoding=encodings,
-        #     label_vec=label_vec,
-        #     labels_text=labels,
-        #     valid_indices=valid_inds,
-        #     observations=exs,
-        #     start_positions=start_positions,
-        #     end_positions=end_positions,
-        #     batch_indexes_map=batch_indexes_map,
-        #     no_answer_reply=obs_batch[0].get('no_answer_reply', self.dict.cls_token)
-        # )
 
     def _pad_tensor(self, items):
         """

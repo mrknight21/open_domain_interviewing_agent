@@ -11,19 +11,20 @@ from parlai.utils.torch import padded_tensor
 from transformers import LongformerModel, LongformerTokenizer, LongformerConfig, LongformerTokenizerFast
 import collections
 
-class LongformerEncoder(torch.nn.Module):
+class HFLongformerQAModel(TorchExtractiveModel):
     """
         Bert Encoder.
 
         This encoder is initialized with the pretrained model from Hugging Face.
         """
 
-    def __init__(self, opt, dict):
-        super().__init__()
-        self.transformer = self._init_from_pretrained(opt)
-        self.use_cuda = not opt["no_cuda"] and torch.cuda.is_available()
+    def __init__(self, opt):
 
-    def _init_from_pretrained(self, opt):
+        # init the model
+        super().__init__(opt)
+        self.model_type = 'longformer'
+
+    def get_config_key(self, opt):
         # load model
         # check if datapath has the files that hugging face code looks for
         if all(
@@ -35,52 +36,9 @@ class LongformerEncoder(torch.nn.Module):
             fle_key = os.path.join(opt["datapath"], "models", "longformer_hf")
         else:
             fle_key = opt["longformer_type"]
-        return LongformerModel.from_pretrained(fle_key)
-
-class HFLongformerQAModel(TorchExtractiveModel):
-    """
-    """
-
-    def __init__(self, opt, dict):
-
-        # init the model
-        super().__init__()
-        self.encoder = LongformerEncoder(opt, dict)
-        self.config = self.encoder.transformer.config
-        self.hidden_size = self.config.hidden_size
-        self.qa_outputs = nn.Linear(self.encoder.transformer.config.hidden_size, self.num_labels)
-
-    def output(self, tensor):
-        """
-        Compute output logits.
-
-        Because we concatenate the context with the labels using the
-        `concat_without_padding` function, we must truncate the input tensor to return
-        only the scores for the label tokens.
-        """
-        # get only scores for labels
-        if self.text_lengths is not None:
-            total_length = max(self.text_lengths)
-            to_select = tensor.size(1) - total_length
-            if not self.add_start_token:
-                to_select = to_select + 1
-            if to_select > 0:
-                # select only label scores
-                bsz = tensor.size(0)
-                new_tensors = []
-                for i in range(bsz):
-                    start = self.text_lengths[i]
-                    if not self.add_start_token:
-                        start = start - 1
-                    end = start + to_select
-                    new_tensors.append(tensor[i : i + 1, start:end, :])
-                tensor = torch.cat(new_tensors, 0)
-
-        return self.lm_head(tensor)
-
+        return fle_key
 
 class LongformerDictionaryAgent(HuggingFaceDictionaryAgent):
-    QA_SPECIAL_TOKENS_OFFSET = 3
 
     def is_prebuilt(self):
         """
@@ -191,7 +149,7 @@ class LongformerQaAgent(TorchSpanAgent):
         self.query_truncate = opt['query_maximum_length']
         self.context_truncate = opt['context_maximum_length']
         self.history_truncate = opt['history_maximum_length']
-        self.truncate = self.dict.tokenizer.max_len
+        self.truncate = self.dict.tokenizer.model_max_length
         self.doc_stride = self.context_truncate
 
     @staticmethod
@@ -207,111 +165,7 @@ class LongformerQaAgent(TorchSpanAgent):
         """
         Build and return model.
         """
-        return HFLongformerQAModel(self.opt, self.dict)
-
-    # Tokenize our training dataset
-    # def _set_text_vec(self, obs, history, truncate, is_training=True):
-    #     # Tokenize contexts and questions (as pairs of inputs)
-    #     if 'text' not in obs:
-    #         return obs
-    #     # The -3 accounts for [CLS], [SEP] and [SEP] and [SEP]
-    #
-    #     start_positions = []
-    #     end_positions = []
-    #     tok_to_orig_index = []
-    #     orig_to_tok_index = []
-    #     all_doc_tokens = self.dict.tokenizer.tokenize(obs['context'])
-    #     context_encodings = self.dict.tokenizer.encode_plus(obs['context'])
-    #     ans_text = obs.get('single_label_text', None)
-    #     history_text = self.truncate_with_dic(" ".join(history.history_strings[:-1]), self.history_truncate, latest=True)
-    #     question_text = self.truncate_with_dic(obs['question_text'], self.query_truncate)
-    #     query_tokens = self.dict.tokenizer.tokenize(question_text)
-    #     # The -3 accounts for special tokens
-    #     max_tokens_for_doc = self.truncate - len(query_tokens) - self.history_truncate - 4
-    #     if is_training and obs['is_impossible']:
-    #         tok_start_position = -1
-    #         tok_end_position = -1
-    #     elif is_training:
-    #         start_idx, end_idx = self.get_correct_alignement(obs['context'], obs['single_label_text'],
-    #                                                          int(obs['char_answer_start']))
-    #         tok_start_position = context_encodings.char_to_token(start_idx)
-    #         tok_end_position = context_encodings.char_to_token(end_idx-1)
-    #     if tok_start_position is None or tok_end_position is None:
-    #         print('no start')
-    #         tok_start_position = -1
-    #         tok_end_position = -1
-    #     question_texts = []
-    #     context_texts = []
-    #     text_vecs = []
-    #
-    #     # We can have documents that are longer than the maximum sequence length.
-    #     # To deal with this we do a sliding window approach, where we take chunks
-    #     # of the up to our max length with a stride of `doc_stride`.
-    #     _DocSpan = collections.namedtuple(  # pylint: disable=invalid-name
-    #         "DocSpan", ["start", "length"])
-    #     doc_spans = []
-    #     start_offset = 0
-    #     while start_offset < len(all_doc_tokens):
-    #         length = len(all_doc_tokens) - start_offset
-    #         if length > max_tokens_for_doc:
-    #             length = max_tokens_for_doc
-    #         doc_spans.append(_DocSpan(start=start_offset, length=length))
-    #         if start_offset + length == len(all_doc_tokens):
-    #             break
-    #         start_offset += min(length, self.doc_stride)
-    #
-    #     if len(doc_spans) > 1:
-    #         logging.info('Chuncking document with {} tokens shift'.format(self.doc_stride))
-    #     for (doc_span_index, doc_span) in enumerate(doc_spans):
-    #         # context_tokens = all_doc_tokens[doc_span[0]:doc_span[1]]
-    #         context_text = self.slice_text_with_token_index(obs['context'], doc_span[0], doc_span[1])
-    #         if history_text:
-    #             context_text = context_text + " " + history_text
-    #
-    #         start_position = None
-    #         end_position = None
-    #         if is_training and not obs['is_impossible']:
-    #             # For training, if our document chunk does not contain an annotation
-    #             # we throw it out, since there is nothing to predict.
-    #             doc_start = doc_span.start
-    #             doc_end = doc_span.start + doc_span.length - 1
-    #             out_of_span = False
-    #             if not (tok_start_position >= doc_start and
-    #                     tok_end_position <= doc_end):
-    #                 out_of_span = True
-    #             if out_of_span:
-    #                 start_position = 0
-    #                 end_position = 0
-    #             else:
-    #                 doc_offset = len(query_tokens) + 2
-    #                 start_position = tok_start_position - doc_start + doc_offset
-    #                 end_position = tok_end_position - doc_start + doc_offset
-    #
-    #         if is_training and obs['is_impossible']:
-    #             start_position = 0
-    #             end_position = 0
-    #         text_vec = self.dict.tokenizer.encode_plus(question_text, context_text,
-    #                                                     pad_to_max_length=True,
-    #                                                     add_special_tokens=True,
-    #                                                     padding=True,
-    #                                                     max_length=self.truncate,
-    #                                                     return_attention_mask=True,
-    #                                                     truncation=True,
-    #                                                     return_tensors='pt')['input_ids'][0]
-    #         text_vecs.append(text_vec)
-    #         question_texts.append(question_text)
-    #         context_texts.append(context_text)
-    #         start_positions.append(start_position)
-    #         end_positions.append(end_position)
-    #
-    #     full_text_dict ={'question_texts': question_texts, 'context_texts': context_texts}
-    #
-    #     obs['text_vec'] = text_vecs
-    #     obs['full_text_dict'] = full_text_dict
-    #     obs['answer_starts'] = start_positions
-    #     obs['answer_ends'] = end_positions
-    #     return obs
-
+        return HFLongformerQAModel(self.opt)
 
     # Tokenize our training dataset
     def convert_to_features(self, example):

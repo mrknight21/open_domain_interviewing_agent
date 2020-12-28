@@ -13,18 +13,6 @@ SPECIAL_TOKENS = {"unk_token": "[UNK]", "sep_token": "[SEP]",
                   "pad_token": "[PAD]", "cls_token": "[CLS]",
                   "mask_token": "[MASK]"}
 
-# class BertEncoder(torch.nn.Module):
-#     """
-#         Bert Encoder.
-#
-#         This encoder is initialized with the pretrained model from Hugging Face.
-#         """
-#
-#     def __init__(self, opt, dict):
-#         super().__init__()
-#         self.transformer = self._init_from_pretrained(opt)
-#         self.use_cuda = not opt["no_cuda"] and torch.cuda.is_available()
-
 
 class HFBertQAModel(TorchExtractiveModel):
     """
