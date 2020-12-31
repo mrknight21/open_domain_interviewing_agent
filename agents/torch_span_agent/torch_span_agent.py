@@ -44,9 +44,25 @@ class DialogueHistory(History):
         Clear the history.
         """
         self.history_raw_strings = []
+        self.history_dialogues = []
         self.history_strings = []
         self.history_vecs = []
         self.context = None
+
+    def _update_dialogues(self, text):
+        """
+        Update the history dialogue with te given observation.
+        dialogue is a tuple with index 0 from the others and the index 1 from self
+        :param text: the current observed utterance text
+        """
+        if self.size > 0:
+            while len(self.history_dialogues) >= self.size/2:
+                self.history_dialogues.pop(0)
+        dialogue = [text, None]
+        if self.history_dialogues and self.history_dialogues[-1][1] is None:
+            self.history_dialogues[-1][1] = text
+        else:
+            self.history_dialogues.append(dialogue)
 
     def update_history(self, obs: Message, temp_history: Optional[str] = None):
         """
@@ -63,7 +79,7 @@ class DialogueHistory(History):
         if "text" in obs and obs["text"] is not None:
             if not self.context:
                     self.context = obs['context']
-            text = obs['question_text']
+            text = obs['text']
             self._update_raw_strings(text)
             if self.add_person_tokens:
                 text = self._add_person_tokens(
@@ -71,6 +87,8 @@ class DialogueHistory(History):
                 )
             # update history string
             self._update_strings(text)
+            # update history dialogues
+            self._update_dialogues(text)
             # update history vecs
             self._update_vecs(text)
         self.temp_history = temp_history
@@ -90,6 +108,20 @@ class DialogueHistory(History):
         history.extend(self.history_vecs[-1])
 
         return history
+
+    def add_reply(self, text):
+        """
+        Add your own response to the history.
+        """
+        self._update_raw_strings(text)
+        if self.add_person_tokens:
+            text = self._add_person_tokens(text, self.p2_token)
+        # update history string
+        self._update_strings(text)
+        # update history vecs
+        self._update_vecs(text)
+        # update history dialogues
+        self._update_dialogues(text)
 
 
 class TorchExtractiveModel(nn.Module, ABC):
@@ -466,18 +498,21 @@ class TorchSpanAgent(TorchAgent):
                                           max_query_length, padding_strategy, is_training):
         features = []
         tokenizer = self.dict.tokenizer
-        if self.history_truncate > 0 and len(self.history.history_strings) > 0:
+        if self.history_truncate > 0 and len(self.history.history_strings) > 1:
             tokens_count = 0
             history_text = ""
-            for h_string in reversed(self.history.history_strings):
-                tokens = tokenizer.tokenize(h_string)
+            for idx, dialogue in enumerate(reversed(self.history.history_dialogues)):
+                if dialogue[1] is None: continue
+                d_text = "\n " + dialogue[0] + " " + dialogue[1]
+                tokens = tokenizer.tokenize(d_text)
                 tokens_count += len(tokens)
                 if tokens_count <= self.history_truncate:
-                    history_text += h_string
+                    history_text += d_text
                 else:
                     break
-            truncated_history = [tokenizer._sep_token] + tokenizer.encode(
+            truncated_history = tokenizer.encode(
                 history_text, add_special_tokens=False, truncation=True, max_length=max_query_length)
+            truncated_history.append(tokenizer.sep_token_id)
         else:
             truncated_history = []
         if is_training and not example.is_impossible:
@@ -497,7 +532,17 @@ class TorchSpanAgent(TorchAgent):
         all_doc_tokens = []
         for (i, token) in enumerate(example.doc_tokens):
             orig_to_tok_index.append(len(all_doc_tokens))
-            sub_tokens = tokenizer.tokenize(token)
+            if tokenizer.__class__.__name__ in [
+                "RobertaTokenizer",
+                "LongformerTokenizer",
+                "BartTokenizer",
+                "RobertaTokenizerFast",
+                "LongformerTokenizerFast",
+                "BartTokenizerFast",
+            ]:
+                sub_tokens = tokenizer.tokenize(token, add_prefix_space=True)
+            else:
+                sub_tokens = tokenizer.tokenize(token)
             for sub_token in sub_tokens:
                 tok_to_orig_index.append(i)
                 all_doc_tokens.append(sub_token)
@@ -558,7 +603,7 @@ class TorchSpanAgent(TorchAgent):
             )
             if len(truncated_history) > 0:
                 if tokenizer.pad_token_id in encoded_dict["input_ids"]:
-                    content_end_index = encoded_dict["input_ids"].index(tokenizer.pad_token_id)
+                    content_end_index = encoded_dict["input_ids"].index(tokenizer.pad_token_id) -1
                     history_end_index = min(content_end_index + len(truncated_history), max_seq_length)
                     encoded_dict["input_ids"][content_end_index:history_end_index] = truncated_history
                     encoded_dict["token_type_ids"][content_end_index:history_end_index] = torch.LongTensor(

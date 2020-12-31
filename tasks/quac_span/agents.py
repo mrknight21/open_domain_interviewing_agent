@@ -1,5 +1,6 @@
 from parlai.tasks.quac.agents import DefaultTeacher as quac_teacher,_path
 from parlai_internal.utilities import util
+from transformers.data.processors.squad import SquadExample
 
 NO_ANSWER_REPLY = "CANNOTANSWER"
 
@@ -10,63 +11,48 @@ class DefaultTeacher(quac_teacher):
         Get a specific example from the dataset.
         """
         ex = self.episodes[episode_idx][entry_idx]
+        is_training = self.datatype == "train"
+        qas_id = str(episode_idx) + "_" + str(entry_idx)
         start_episode_text = self.episodes[episode_idx][0]['text']
         article_end_index = start_episode_text.index(" CANNOTANSWER\n")
-        context = start_episode_text[:article_end_index]
+        context_text = start_episode_text[:article_end_index]
         # doc_tokens, char_to_word_offset = util.build_char_word_offset_list(context)
         text = ex['text']
         if entry_idx == 0:
             question_text = text[article_end_index+14:]
         else:
             question_text = text
-        labels = ex['labels']
-        single_label_text = ex['labels'][0]
-        is_impossible = single_label_text == NO_ANSWER_REPLY
+        answer_text = ex['labels'][0]
+        start_position_character = None
+        is_impossible = answer_text == NO_ANSWER_REPLY
         if not is_impossible:
-            orig_answer_text = single_label_text
-            answer_offset = ex["answer_starts"]
-            if "|" in answer_offset:
-                answer_offset = int(answer_offset.split("|")[0])
-            else:
-                answer_offset = int(answer_offset)
-            # answer_length = len(orig_answer_text)
-            # start_position = char_to_word_offset[answer_offset]
-            # end_position = char_to_word_offset[answer_offset + answer_length - 1]
-            # Only add answers where the text can be exactly recovered from the
-            # document. If this CAN'T happen it's likely due to weird Unicode
-            # stuff so we will just skip the example.
-            #
-            # Note that this means for training mode, every example is NOT
-            # guaranteed to be preserved.
-            # actual_text = " ".join(
-            #     doc_tokens[start_position:(end_position + 1)])
-            # cleaned_answer_text = " ".join(
-            #     util.whitespace_tokenize(orig_answer_text))
-            # if actual_text.find(cleaned_answer_text) == -1:
-            #     print("Could not find answer: '%s' vs. '%s'",
-            #                        actual_text, cleaned_answer_text)
-            #     return None
+            answers = ex['labels']
+            start_position_character = int(ex["answer_starts"])
         else:
-            # start_position = -1
-            # end_position = -1
-            answer_offset = -1
-            single_label_text = NO_ANSWER_REPLY
-            labels = [NO_ANSWER_REPLY]
+            answers = [NO_ANSWER_REPLY]
+
+        squad_example = SquadExample(
+                        qas_id=qas_id,
+                        question_text=question_text,
+                        context_text=context_text,
+                        answer_text=answer_text,
+                        start_position_character=start_position_character,
+                        title="unknown title",
+                        is_impossible=is_impossible,
+                        answers=answers,
+                    )
 
         action = {
-            'id': 'quac',
-            'qas_id': str(episode_idx) + "_" + str(entry_idx),
-            'text': context + ' ' + question_text,
-            # 'doc_tokens': doc_tokens,
-            'context': context,
-            'question_text': question_text,
-            'labels': labels,
-            'single_label_text': single_label_text,
+            'id': 'squad',
+            'qas_id': qas_id,
+            'labels': answers,
+            'context': context_text,
+            'squad_example': squad_example,
+            'single_label_text': answer_text,
             'episode_done': ex['episode_done'],
-            # 'start_position': start_position,
-            # 'end_position': end_position,
-            'char_answer_start': answer_offset,
             'is_impossible': is_impossible,
+            'text': question_text,
             'no_answer_reply': NO_ANSWER_REPLY
         }
         return action
+

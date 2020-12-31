@@ -48,6 +48,7 @@ class DefaultTeacher(IndexTeacher):
         action = {
             'id': 'squad',
             'qas_id': qas_id,
+            'context': context_text,
             'labels': answers,
             'squad_example': squad_example,
             'single_label_text': answer_text,

@@ -1,15 +1,10 @@
 import os
 
-import torch
-import torch.nn as nn
+
 from parlai_internal.agents.torch_span_agent.torch_span_agent import TorchSpanAgent, TorchExtractiveModel
-from parlai_internal.utilities import util
 from parlai.agents.hugging_face.dict import HuggingFaceDictionaryAgent
 from parlai.utils.misc import warn_once
-import parlai.utils.logging as logging
-from parlai.utils.torch import padded_tensor
-from transformers import LongformerModel, LongformerTokenizer, LongformerConfig, LongformerTokenizerFast
-import collections
+from transformers import AutoTokenizer
 
 class HFLongformerQAModel(TorchExtractiveModel):
     """
@@ -51,7 +46,7 @@ class LongformerDictionaryAgent(HuggingFaceDictionaryAgent):
         Instantiate tokenizer.
         """
         fle_key = opt["longformer_type"]
-        return LongformerTokenizerFast.from_pretrained(fle_key)
+        return AutoTokenizer.from_pretrained(fle_key, use_fast=False)
 
     def _define_special_tokens(self, opt):
         if opt["add_special_tokens"]:
@@ -130,6 +125,13 @@ class LongformerQaAgent(TorchSpanAgent):
             help="Add special tokens (like PAD, etc.). If False, "
             "Can only use with batch size 1.",
         )
+        agent.add_argument(
+            "--add-global-query-attention",
+            type="bool",
+            default=True,
+            help="Add global attention to query tokens "
+            "Can only use with batch size 1.",
+        )
         argparser.set_defaults(
             text_truncate=4096,
             label_truncate=256,
@@ -149,6 +151,7 @@ class LongformerQaAgent(TorchSpanAgent):
         self.query_truncate = opt['query_maximum_length']
         self.context_truncate = opt['context_maximum_length']
         self.history_truncate = opt['history_maximum_length']
+        self.global_query_attention = opt.get('--add-global-query-attention', False)
         self.truncate = self.dict.tokenizer.model_max_length
         self.doc_stride = self.context_truncate
 
