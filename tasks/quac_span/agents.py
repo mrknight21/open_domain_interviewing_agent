@@ -27,7 +27,10 @@ class DefaultTeacher(quac_teacher):
         is_impossible = answer_text == NO_ANSWER_REPLY
         if not is_impossible:
             answers = ex['labels']
-            start_position_character = int(ex["answer_starts"])
+            if not is_training:
+                start_position_character = int(ex["answer_starts"].split('|')[0])
+            else:
+                start_position_character = int(ex["answer_starts"])
         else:
             answers = [NO_ANSWER_REPLY]
 

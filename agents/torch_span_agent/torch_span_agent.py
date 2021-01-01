@@ -9,7 +9,7 @@ import parlai.utils.logging as logging
 from parlai.utils.distributed import is_distributed
 from parlai.utils.torch import PipelineHelper, total_parameters, trainable_parameters, padded_tensor
 from parlai.utils.fp16 import FP16SafeCrossEntropy
-from parlai.utils.data import DatatypeHelper
+from parlai_internal.utilities import util
 from parlai.core.metrics import AverageMetric, F1Metric
 from parlai.core.message import Message
 
@@ -19,15 +19,21 @@ from transformers import (
 )
 from transformers.data.processors.squad import (
     SquadFeatures,
+    SquadResult,
     _new_check_is_max_context,
     _improve_answer_span,
     MULTI_SEP_TOKENS_TOKENIZERS_SET,
     whitespace_tokenize
 )
+from transformers.data.metrics.squad_metrics import (
+    _get_best_indexes,
+    get_final_text,
+    _compute_softmax
+)
 from transformers.tokenization_utils_base import TruncationStrategy
 
 
-from collections import deque
+from collections import deque, namedtuple, OrderedDict
 import numpy as np
 import torch
 import torch.nn as nn
@@ -312,101 +318,6 @@ class TorchSpanAgent(TorchAgent):
         """
         return None
 
-    def compute_loss(self, batch, return_output=False):
-        """
-                Compute and return the loss for the given batch.
-
-                Easily overridable for customized loss functions.
-
-                If return_output is True, the full output from the call to self.model()
-                is also returned, via a (loss, model_output) pair.
-                """
-        if batch.text_vec is None:
-            raise ValueError('Cannot generate outputs without text vectors.')
-        no_answer_reply = batch.get('no_answer_reply', self.dict.cls_token)
-        output = self.model(self._model_input(batch))
-        if return_output:
-            start_logits, end_logits= output['start_logits'].detach().cpu(), output['end_logits'].detach().cpu()
-            # total_loss = output['loss']
-            # start_logits, end_logits, sequence_output = self.model(self._model_input(batch))
-            # start_positions = batch.get('start_positions', None)
-            # end_positions = batch.get('end_positions', None)
-            output_start_positions, output_end_positions = torch.argmax(start_logits, dim=1), torch.argmax(end_logits, dim=1)
-            end_start_pairs = torch.stack((output_start_positions, output_end_positions), dim=1).cpu().data.numpy()
-            output_text = []
-            combined_pair_conf = []
-            batch_output_text = []
-            for i in range(end_start_pairs.shape[0]):
-                pair = end_start_pairs[i]
-                start_confidence = start_logits[i][pair[0]]
-                end_confidence = end_logits[i][pair[1]]
-                pair_confidence = start_confidence + end_confidence
-                combined_pair_conf.append(pair_confidence)
-                if pair[0] <= pair[1]:
-                    output_id = batch.text_vec[i][pair[0]: pair[1]+1]
-                    text = self.dict.tokenizer.decode(output_id.tolist()).replace(self.dict.cls_token, '')
-                    if text == "":
-                        output_text.append(no_answer_reply)
-                    else:
-                        output_text.append(text)
-                else:
-                    output_text.append(no_answer_reply)
-
-            # losses = []
-            # start_losses = []
-            # end_losses = []
-            # correct_span_nums = []
-            if batch.get('start_positions', None) is not None:
-                # start_positions = start_positions.detach().cpu()
-                # end_positions = end_positions.detach().cpu()
-                # # If we are on multi-GPU, split add a dimension
-                # if len(start_positions.size()) > 1:
-                #     start_positions = start_positions.squeeze(-1)
-                # if len(end_positions.size()) > 1:
-                #     end_positions = end_positions.squeeze(-1)
-                # # # sometimes the start/end positions are outside our model inputs, we ignore these terms
-                #
-                # ignored_index = start_logits.size(1)
-                # start_positions.clamp_(0, ignored_index)
-                # end_positions.clamp_(0, ignored_index)
-                for doc_indexes in batch['batch_indexes_map']:
-                    # cur_loss = 0
-                    index_start, index_end = doc_indexes[0], doc_indexes[-1]+1
-                    cur_output_tex = output_text[index_start: index_end]
-                    cur_pair_conf = combined_pair_conf[index_start: index_end]
-                    max_conf_index = cur_pair_conf.index(max(cur_pair_conf))
-                    batch_output_text.append(cur_output_tex[max_conf_index])
-            #
-            #     cur_start_logits = start_logits[index_start: index_end]
-            #     cur_end_logits = end_logits[index_start: index_end]
-            #     start_loss = self.criterion(cur_start_logits, torch.flatten(start_positions[index_start: index_end])).mean()
-            #     end_loss = self.criterion(cur_end_logits, torch.flatten(end_positions[index_start: index_end])).mean()
-            #     cur_loss = (start_loss + end_loss) / 2
-            #     start_corrects = output_start_positions[index_start: index_end] == start_positions[index_start: index_end]
-            #     end_corrects = output_end_positions[index_start: index_end] == end_positions[index_start: index_end]
-            #     correct_span_num = start_corrects * end_corrects
-            #     correct_span_num = correct_span_num.sum()
-            #     losses.append(cur_loss)
-            #     start_losses.append(start_loss)
-            #     end_losses.append(end_loss)
-            #     correct_span_nums.append(correct_span_num)
-            # doc_count = [len(doc_indexes) for doc_indexes in batch['batch_indexes_map']]
-            # self.record_local_metric('docs_loss', AverageMetric.many(losses, batches_count))
-            # self.record_local_metric('start_loss', AverageMetric.many(start_losses, batches_count))
-            # self.record_local_metric('end_loss', AverageMetric.many(end_losses, batches_count))
-            # self.record_local_metric('span_acc', AverageMetric.many(correct_span_nums, doc_count))
-
-            model_output = {"output_start_positions": output_start_positions,
-                            "output_end_positions": output_end_positions,
-                            "text": batch_output_text}
-        batches_count = [1] * batch.batchsize
-        self.record_local_metric('loss', AverageMetric.many([output['loss'].data.cpu()]*batch.batchsize, batches_count))
-
-        if return_output:
-            return (output['loss'], model_output)
-        else:
-            return output['loss']
-
     def build_criterion(self):
         """
         Construct and return the loss function.
@@ -469,18 +380,194 @@ class TorchSpanAgent(TorchAgent):
                 raise e
 
     def eval_step(self, batch):
-        """
-               Train on a single batch of examples.
-               """
+        n_best_size = 30
+        max_answer_length = 50
+        null_score_diff_threshold = 0.0
+        tokenizer = self.dict.tokenizer
         if batch.batch_indexes_map is None:
             return
         else:
             bsz = batch.batchsize
         self.model.eval()
-        loss, model_output = self.compute_loss(batch, return_output=True)
-        preds = model_output['text']
-        return Output(preds)
+        loss, outputs = self.compute_loss(batch, return_output=True)
+        no_answer_reply = batch.get('no_answer_reply', self.dict.cls_token)
+        _PrelimPrediction = namedtuple(  # pylint: disable=invalid-name
+            "PrelimPrediction", ["feature_index", "start_index", "end_index", "start_logit", "end_logit"]
+        )
+        all_predictions = OrderedDict()
+        all_nbest_json = OrderedDict()
+        scores_diff_json = OrderedDict()
+        batch_best_preds = []
+        for e_index, feature_indices in enumerate(batch.batch_indexes_map):
+            prelim_predictions = []
+            example = batch.examples[e_index]
+            score_null = 1000000  # large and positive
+            min_null_feature_index = 0  # the paragraph slice with min null score
+            null_start_logit = 0  # the start logit at the slice with min null score
+            null_end_logit = 0  # the end logit at the slice with min null score
+            for f_index in feature_indices:
+                feature = batch.features[f_index]
+                f_output = [util.to_list(output[f_index]) for output in outputs.to_tuple() if len(output.size()) > 1]
+                start_logits, end_logits = f_output
+                result = SquadResult(f_index, start_logits, end_logits)
+                start_indexes = _get_best_indexes(result.start_logits, n_best_size)
+                end_indexes = _get_best_indexes(result.end_logits, n_best_size)
+                feature_null_score = result.start_logits[0] + result.end_logits[0]
+                if feature_null_score < score_null:
+                    score_null = feature_null_score
+                    min_null_feature_index = f_index
+                    null_start_logit = result.start_logits[0]
+                    null_end_logit = result.end_logits[0]
+                for start_index in start_indexes:
+                    for end_index in end_indexes:
+                        # We could hypothetically create invalid predictions, e.g., predict
+                        # that the start of the span is in the question. We throw out all
+                        # invalid predictions.
+                        if start_index >= len(feature.tokens):
+                            continue
+                        if end_index >= len(feature.tokens):
+                            continue
+                        if start_index not in feature.token_to_orig_map:
+                            continue
+                        if end_index not in feature.token_to_orig_map:
+                            continue
+                        if not feature.token_is_max_context.get(start_index, False):
+                            continue
+                        if end_index < start_index:
+                            continue
+                        length = end_index - start_index + 1
+                        if length > max_answer_length:
+                            continue
+                        prelim_predictions.append(
+                            _PrelimPrediction(
+                                feature_index=f_index,
+                                start_index=start_index,
+                                end_index=end_index,
+                                start_logit=result.start_logits[start_index],
+                                end_logit=result.end_logits[end_index],
+                            )
+                        )
+            prelim_predictions.append(
+                _PrelimPrediction(
+                    feature_index=min_null_feature_index,
+                    start_index=0,
+                    end_index=0,
+                    start_logit=null_start_logit,
+                    end_logit=null_end_logit,
+                )
+            )
+            prelim_predictions = sorted(prelim_predictions, key=lambda x: (x.start_logit + x.end_logit), reverse=True)
+            _NbestPrediction = namedtuple(  # pylint: disable=invalid-name
+                "NbestPrediction", ["text", "start_logit", "end_logit"]
+            )
+            seen_predictions = {}
+            nbest = []
+            for pred in prelim_predictions:
+                if len(nbest) >= n_best_size:
+                    break
+                feature = batch.features[pred.feature_index]
+                if pred.start_index > 0:  # this is a non-null prediction
+                    tok_tokens = feature.tokens[pred.start_index: (pred.end_index + 1)]
+                    orig_doc_start = feature.token_to_orig_map[pred.start_index]
+                    orig_doc_end = feature.token_to_orig_map[pred.end_index]
+                    orig_tokens = example.doc_tokens[orig_doc_start: (orig_doc_end + 1)]
 
+                    tok_text = tokenizer.convert_tokens_to_string(tok_tokens)
+
+                    # tok_text = " ".join(tok_tokens)
+                    #
+                    # # De-tokenize WordPieces that have been split off.
+                    # tok_text = tok_text.replace(" ##", "")
+                    # tok_text = tok_text.replace("##", "")
+
+                    # Clean whitespace
+                    tok_text = tok_text.strip()
+                    tok_text = " ".join(tok_text.split())
+                    orig_text = " ".join(orig_tokens)
+
+                    final_text = get_final_text(tok_text, orig_text, True)
+                    if final_text in seen_predictions:
+                        continue
+
+                    seen_predictions[final_text] = True
+                else:
+                    final_text = no_answer_reply
+                    seen_predictions[final_text] = True
+
+                nbest.append(_NbestPrediction(text=final_text, start_logit=pred.start_logit, end_logit=pred.end_logit))
+
+            # if we didn't include the empty option in the n-best, include it
+            # if version_2_with_negative:
+            if no_answer_reply not in seen_predictions:
+                nbest.append(_NbestPrediction(text=no_answer_reply, start_logit=null_start_logit, end_logit=null_end_logit))
+
+            # In very rare edge cases we could only have single null prediction.
+            # So we just create a nonce prediction in this case to avoid failure.
+            if len(nbest) == 1:
+                nbest.insert(0, _NbestPrediction(text=no_answer_reply, start_logit=0.0, end_logit=0.0))
+
+            # In very rare edge cases we could have no valid predictions. So we
+            # just create a nonce prediction in this case to avoid failure.
+            if not nbest:
+                nbest.append(_NbestPrediction(text=no_answer_reply, start_logit=0.0, end_logit=0.0))
+
+            assert len(nbest) >= 1, "No valid predictions"
+
+            total_scores = []
+            best_non_null_entry = None
+            for entry in nbest:
+                total_scores.append(entry.start_logit + entry.end_logit)
+                if not best_non_null_entry:
+                    if entry.text:
+                        best_non_null_entry = entry
+
+            probs = _compute_softmax(total_scores)
+
+            nbest_json = []
+            for (i, entry) in enumerate(nbest):
+                output = OrderedDict()
+                output["text"] = entry.text
+                output["probability"] = probs[i]
+                output["start_logit"] = entry.start_logit
+                output["end_logit"] = entry.end_logit
+                nbest_json.append(output)
+
+            assert len(nbest_json) >= 1, "No valid predictions"
+
+            # if not version_2_with_negative:
+            #     all_predictions[example.qas_id] = nbest_json[0]["text"]
+            # else:
+            # predict "" iff the null score - the score of best non-null > threshold
+            score_diff = score_null - best_non_null_entry.start_logit - (best_non_null_entry.end_logit)
+            scores_diff_json[example.qas_id] = score_diff
+            if score_diff > null_score_diff_threshold:
+                all_predictions[example.qas_id] = no_answer_reply
+                batch_best_preds.append(no_answer_reply)
+            else:
+                all_predictions[example.qas_id] = best_non_null_entry.text
+                batch_best_preds.append(best_non_null_entry.text)
+            all_nbest_json[example.qas_id] = nbest_json
+        return Output(batch_best_preds)
+
+    def compute_loss(self, batch, return_output=False):
+        """
+                Compute and return the loss for the given batch.
+
+                Easily overridable for customized loss functions.
+
+                If return_output is True, the full output from the call to self.model()
+                is also returned, via a (loss, model_output) pair.
+                """
+        if batch.text_vec is None:
+            raise ValueError('Cannot generate outputs without text vectors.')
+        output = self.model(self._model_input(batch))
+        batches_count = [1] * batch.batchsize
+        self.record_local_metric('loss', AverageMetric.many([output['loss'].data.cpu()]*batch.batchsize, batches_count))
+
+        if return_output:
+            return output['loss'], output
+        else:
+            return output['loss']
 
     def _set_label_vec(self, obs, add_start, add_end, label_truncate):
         """
@@ -502,7 +589,8 @@ class TorchSpanAgent(TorchAgent):
             tokens_count = 0
             history_text = ""
             for idx, dialogue in enumerate(reversed(self.history.history_dialogues)):
-                if dialogue[1] is None: continue
+                if dialogue[1] is None:
+                    continue
                 d_text = "\n " + dialogue[0] + " " + dialogue[1]
                 tokens = tokenizer.tokenize(d_text)
                 tokens_count += len(tokens)
@@ -526,7 +614,6 @@ class TorchSpanAgent(TorchAgent):
             if actual_text.find(cleaned_answer_text) == -1:
                 logging.warning("Could not find answer: '%s' vs. '%s'", actual_text, cleaned_answer_text)
                 return []
-
         tok_to_orig_index = []
         orig_to_tok_index = []
         all_doc_tokens = []
@@ -771,10 +858,13 @@ class TorchSpanAgent(TorchAgent):
         valid_inds, exs = zip(*valid_obs)
         features = []
         batch_indexes_map = []
+        examples = []
         unique_id = 1000000000
         cur_index = 0
         for example_index, example in valid_obs:
             cur_ex_docs = []
+            squad_ex = example.get('squad_example')
+            examples.append(squad_ex)
             example_features = example.get('text_vec', None)
             if not example_features:
                 continue
@@ -810,10 +900,12 @@ class TorchSpanAgent(TorchAgent):
             end_positions=all_end_positions,
             cls_index=all_cls_index,
             p_mask=all_p_mask,
+            examples=examples,
             is_impossible=all_is_impossible,
             features_index=all_feature_index,
             batch_indexes_map=batch_indexes_map,
             valid_indices=valid_inds,
+            features=features
         )
         if self.use_cuda:
             batch.text_vec = batch.text_vec.cuda()

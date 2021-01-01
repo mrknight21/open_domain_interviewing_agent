@@ -1,13 +1,9 @@
 import os
 
-import torch
-import torch.nn as nn
 from parlai_internal.agents.torch_span_agent.torch_span_agent import TorchSpanAgent, TorchExtractiveModel
 from parlai.agents.hugging_face.dict import HuggingFaceDictionaryAgent
 from parlai.utils.misc import warn_once
-import parlai.utils.logging as logging
-from parlai.utils.torch import padded_tensor
-from transformers import BertTokenizer, BertModel
+from transformers import BertTokenizer
 
 SPECIAL_TOKENS = {"unk_token": "[UNK]", "sep_token": "[SEP]",
                   "pad_token": "[PAD]", "cls_token": "[CLS]",

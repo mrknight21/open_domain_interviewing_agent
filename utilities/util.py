@@ -111,3 +111,7 @@ def get_correct_alignement(context, gold_text, start_idx):
         return start_idx - 2, end_idx - 2  # When the gold label is off by two character
     else:
         raise ValueError()
+
+
+def to_list(tensor):
+    return tensor.detach().cpu().tolist()
