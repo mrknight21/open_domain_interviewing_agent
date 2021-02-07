@@ -1,10 +1,29 @@
-from parlai.tasks.quac.agents import DefaultTeacher as quac_teacher,_path
-from parlai_internal.utilities import util
+import os
+import copy
+
 from transformers.data.processors.squad import SquadExample
+from parlai.core.teachers import ParlAIDialogTeacher
+from parlai.utils.misc import warn_once
+from .build import build
+
 
 NO_ANSWER_REPLY = "CANNOTANSWER"
 
-class DefaultTeacher(quac_teacher):
+
+def _path(opt):
+    # Build the data if it doesn't exist.
+    build(opt)
+    dt = opt['datatype'].split(':')[0]
+    if dt == 'test':
+        warn_once('WARNING: Test set not included. Setting datatype to valid.')
+        dt = 'valid'
+    return os.path.join(opt['datapath'], 'QuACFull', dt + '.txt')
+
+class DefaultTeacher(ParlAIDialogTeacher):
+    def __init__(self, opt, shared=None):
+        opt = copy.deepcopy(opt)
+        opt['parlaidialogteacher_datafile'] = _path(opt)
+        super().__init__(opt, shared)
 
     def get(self, episode_idx, entry_idx=None):
         """
@@ -58,4 +77,5 @@ class DefaultTeacher(quac_teacher):
             'no_answer_reply': NO_ANSWER_REPLY
         }
         return action
+
 
