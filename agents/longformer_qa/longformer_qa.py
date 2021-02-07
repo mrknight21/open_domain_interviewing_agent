@@ -2,6 +2,9 @@ import os
 
 
 from parlai_internal.agents.torch_span_agent.torch_span_agent import TorchSpanAgent, TorchExtractiveModel
+from typing import Optional
+from parlai.core.params import ParlaiParser
+from parlai.core.opt import Opt
 from parlai.agents.hugging_face.dict import HuggingFaceDictionaryAgent
 from parlai.utils.misc import warn_once
 from transformers import AutoTokenizer
@@ -87,7 +90,7 @@ class LongformerQaAgent(TorchSpanAgent):
     """
 
     @classmethod
-    def add_cmdline_args(cls, argparser):
+    def add_cmdline_args(cls, argparser, partial_opt: Optional[Opt] = None) -> ParlaiParser:
         super(LongformerQaAgent, cls).add_cmdline_args(argparser)
         agent = argparser.add_argument_group("LongformerQA Args")
         # query maximum length

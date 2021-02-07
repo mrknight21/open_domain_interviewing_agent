@@ -3,6 +3,8 @@ Torch Classifier Agents extract answer text from the context by prediction the s
 """
 
 from abc import ABC
+from typing import Optional
+from parlai.core.params import ParlaiParser
 from parlai.core.opt import Opt
 from parlai.core.torch_agent import TorchAgent, Output, Optional, History, Batch
 import parlai.utils.logging as logging
@@ -12,6 +14,7 @@ from parlai.utils.fp16 import FP16SafeCrossEntropy
 from parlai_internal.utilities import util
 from parlai.core.metrics import AverageMetric, F1Metric
 from parlai.core.message import Message
+
 
 from transformers import (
     AutoConfig,
@@ -184,8 +187,8 @@ class TorchSpanAgent(TorchAgent):
     model.
     """
 
-    @staticmethod
-    def add_cmdline_args(parser):
+    @classmethod
+    def add_cmdline_args(cls, parser, partial_opt: Optional[Opt] = None) -> ParlaiParser:
         """
         Add CLI args.
         """

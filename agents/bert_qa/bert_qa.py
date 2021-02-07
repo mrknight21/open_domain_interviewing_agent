@@ -4,6 +4,9 @@ from parlai_internal.agents.torch_span_agent.torch_span_agent import TorchSpanAg
 from parlai.agents.hugging_face.dict import HuggingFaceDictionaryAgent
 from parlai.utils.misc import warn_once
 from transformers import BertTokenizer
+from typing import Optional
+from parlai.core.params import ParlaiParser
+from parlai.core.opt import Opt
 
 SPECIAL_TOKENS = {"unk_token": "[UNK]", "sep_token": "[SEP]",
                   "pad_token": "[PAD]", "cls_token": "[CLS]",
@@ -91,7 +94,7 @@ class BertQaAgent(TorchSpanAgent):
     """
 
     @classmethod
-    def add_cmdline_args(cls, argparser):
+    def add_cmdline_args(cls, argparser, partial_opt: Optional[Opt] = None) -> ParlaiParser:
         agent = argparser.add_argument_group("BertQa Args")
         agent.add_argument(
             "--bert-type",

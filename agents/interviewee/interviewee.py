@@ -23,6 +23,9 @@ different beam lengths.
 import torch.nn as nn
 import torch.nn.functional as F
 import parlai.core.torch_generator_agent as tga
+from typing import Optional
+from parlai.core.params import ParlaiParser
+from parlai.core.opt import Opt
 
 
 class Encoder(nn.Module):
@@ -183,7 +186,7 @@ class IntervieweeAgent(tga.TorchGeneratorAgent):
     """
 
     @classmethod
-    def add_cmdline_args(cls, argparser):
+    def add_cmdline_args(cls, argparser, partial_opt: Optional[Opt] = None) -> ParlaiParser:
         """
         Add CLI arguments.
         """
