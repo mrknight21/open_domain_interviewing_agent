@@ -1,211 +1,167 @@
-r"""
-Example TorchGeneratorAgent model.
 
-This demonstrates the minimal structure of a building a generative model, consisting of
-an encoder and decoder that each contain a 1-layer LSTM. The subclassed model and agent
-handle passing in the current decoder state during incremental decoding, as well as
-reordering the encoder/decoder states. The base TorchGeneratorAgent class handles common
-generator features like forced decoding, beam search, n-gram beam blocking, and top-k
-and top-p/nucleus sampling.
-
-You can train this agent to a reasonable accuracy with:
-
-.. code-block:: bash
-
-    parlai train_model -m examples/seq2seq \
-        -mf /tmp/example_model \
-        -t convai2 -bs 32 -eps 2 --truncate 128
-
-Afterwards, you can play with --beam-size to see how responses differ with
-different beam lengths.
-"""  # noqa: E501
-
-import torch.nn as nn
-import torch.nn.functional as F
-import parlai.core.torch_generator_agent as tga
-from typing import Optional
-from parlai.core.params import ParlaiParser
+import sys
+import os
+import re
+import spacy
+import torch
+import parlai.utils.logging as logging
+from parlai.core.dict import DictionaryAgent
+from parlai_internal.agents.torch_span_agent.torch_span_agent import TorchSpanAgent
+from parlai_internal.agents.interviewee.models.seq2seq import TeacherModel
+from parlai_internal.agents.interviewee import constants
+import pickle
+import numpy as np
 from parlai.core.opt import Opt
 
 
-class Encoder(nn.Module):
-    """
-    Example encoder, consisting of an embedding layer and a 1-layer LSTM with the
-    specified hidden size.
 
-    Pay particular attention to the ``forward`` output.
-    """
+class IntervieweeDictionaryAgent(DictionaryAgent):
 
-    def __init__(self, embeddings, hidden_size):
+    def __init__(self, opt: Opt, shared=None):
         """
-        Initialization.
-
-        Arguments here can be used to provide hyperparameters.
+        Get the pretrained teacher model vocabs
         """
-        # must call super on all nn.Modules.
-        super().__init__()
+        if 'dict_file' not in opt or not opt['dict_file']:
+            opt['dict_file'] = os.path.join(opt['datapath'], constants.VOCAB_FILE)
+        self.vocab_size = 0
+        self.char_vocab_size = 0
+        self.vocab = None
+        self.nlp = spacy.load("en_core_web_sm", disable=["ner", "tagger", "parser"])
+        self.WHITESPACE = re.compile('\s+')
+        super().__init__(opt)
+        self.override_special_tokens(opt)
 
-        self.embeddings = embeddings
-        self.lstm = nn.LSTM(
-            input_size=hidden_size,
-            hidden_size=hidden_size,
-            num_layers=1,
-            batch_first=True,
-        )
+    def __len__(self):
+        return self.vocab_size
 
-    def forward(self, input_tokens):
+    def load(self, filename):
+        with open(filename, 'rb') as f:
+            vocab = pickle.load(f)
+        self.vocab_size = len(vocab['word2id'])
+        self.char_vocab_size = len(vocab['char2id'])
+        self.tok2ind = vocab['word2id']
+        self.ind2tok = vocab['id2word']
+        self.char2id = vocab['char2id']
+        self.id2char = vocab['id2char']
+        self.wordid2chars = vocab['wordid2chars']
+        self.wordid2docfreq = vocab['wordid2docfreq']
+        logging.info(f'num words = {len(self)}')
+
+    def is_prebuilt(self):
         """
-        Perform the forward pass for the encoder.
-
-        Input *must* be input_tokens, which are the context tokens given
-        as a matrix of lookup IDs.
-
-        :param input_tokens:
-            Input tokens as a bsz x seqlen LongTensor.
-            Likely will contain padding.
-
-        :return:
-            You can return anything you like; it is will be passed verbatim
-            into the decoder for conditioning. However, it should be something
-            you can easily manipulate in ``reorder_encoder_states``.
-            This particular implementation returns the hidden and cell states from the
-            LSTM.
+        Indicates whether the dictionary is fixed, and does not require building.
         """
-        embedded = self.embeddings(input_tokens)
-        _output, hidden = self.lstm(embedded)
-        return hidden
+        return True
 
+    def _define_special_tokens(self, opt):
+        if opt["add_special_tokens"]:
+            # Add addtional start/end/pad tokens
+            # self.tokenizer.add_special_tokens(SPECIAL_TOKENS)
+            self.unk_token = constants.UNK
+            self.pad_token = constants.PAD
+            self.null_token = constants.PAD
+            self.end_token = constants.EOS
+            self.start_token = constants.SOS
 
-class Decoder(nn.Module):
-    """
-    Basic example decoder, consisting of an embedding layer and a 1-layer LSTM with the
-    specified hidden size. Decoder allows for incremental decoding by ingesting the
-    current incremental state on each forward pass.
+    def override_special_tokens(self, opt):
+        # define special tokens
+        self._define_special_tokens(opt)
+        # now override
+        self.unk_idx = constants.UNK_ID
+        self.pad_idx = constants.PAD_ID
+        self.null_idx = constants.PAD_ID
+        self.end_idx = constants.EOS_ID
+        self.start_idx = constants.SOS_ID
 
-    Pay particular note to the ``forward``.
-    """
-
-    def __init__(self, embeddings, hidden_size):
-        """
-        Initialization.
-
-        Arguments here can be used to provide hyperparameters.
-        """
-        super().__init__()
-        self.embeddings = embeddings
-        self.lstm = nn.LSTM(
-            input_size=hidden_size,
-            hidden_size=hidden_size,
-            num_layers=1,
-            batch_first=True,
-        )
-
-    def forward(self, input, encoder_state, incr_state=None):
-        """
-        Run forward pass.
-
-        :param input:
-            The currently generated tokens from the decoder.
-        :param encoder_state:
-            The output from the encoder module.
-        :parm incr_state:
-            The previous hidden state of the decoder.
-        """
-        embedded = self.embeddings(input)
-        if incr_state is None:
-            # this is our very first call. We want to seed the LSTM with the
-            # hidden state of the decoder
-            state = encoder_state
+    def bulk_tokenize(self, text, return_offsets=False):
+        ann = list(self.nlp.pipe(text))
+        if return_offsets:
+            return [[w.text for w in s if not self.WHITESPACE.match(w.text)] for s in ann], [
+                [(w.idx, w.idx + len(w.text)) for w in s if not self.WHITESPACE.match(w.text)] for s in ann]
         else:
-            # We've generated some tokens already, so we can reuse the existing
-            # decoder state
-            state = incr_state
+            return [[w.text for w in s if not self.WHITESPACE.match(w.text)] for s in ann]
+        return ann
 
-        # get the new output and decoder incremental state
-        output, incr_state = self.lstm(embedded, state)
+    def tokenize(self, text, building=False):
+        return self.bulk_tokenize([text])
 
-        return output, incr_state
+    def vec2txt(self, vector, delimiter=' '):
+        """
+        Convert a vector of IDs to a string.
 
+        Converts a vector (iterable of ints) into a string, with each token separated by
+        the delimiter (default ``' '``).
+        """
+        tokens = [self[int(idx)] for idx in vector]
+        if self.tokenizer in ['gpt2', 'bpe', 'slow_bytelevel_bpe']:
+            # if we used a BPE tokenizer we need to rejoin the encodings
+            text = self.bpe.decode(tokens, vector, delimiter)
+        elif self.tokenizer == 'bytelevelbpe':
+            # We add special tokens in the beginning of ParlAI dict but in the
+            # end of Hugging Face dict, there is an offset of #(extra tokens) between them.
+            extra_tokens = 4  # length of special tokens
+            vector = [
+                self.bpe.special_tok_map[idx]
+                if idx in self.bpe.special_tok_map
+                else idx - extra_tokens
+                for idx in vector
+            ]
+            tokens = [self[int(idx)] for idx in vector]
+            text = self.bpe.decode(tokens, vector, delimiter)
+        else:
+            text = delimiter.join(self[int(idx)] for idx in vector)
 
-class ExampleModel(tga.TorchGeneratorModel):
+        return text
+
+class IntervieweeAgent(TorchSpanAgent):
     """
-    ExampleModel implements the abstract methods of TorchGeneratorModel to define how to
-    re-order encoder states and decoder incremental states.
+    Interviewee agent.
 
-    It also instantiates the embedding table, encoder, and decoder, and defines the
-    final output layer.
-    """
-
-    def __init__(self, dictionary, hidden_size=1024):
-        super().__init__(
-            padding_idx=dictionary[dictionary.null_token],
-            start_idx=dictionary[dictionary.start_token],
-            end_idx=dictionary[dictionary.end_token],
-            unknown_idx=dictionary[dictionary.unk_token],
-        )
-        self.embeddings = nn.Embedding(len(dictionary), hidden_size)
-        self.encoder = Encoder(self.embeddings, hidden_size)
-        self.decoder = Decoder(self.embeddings, hidden_size)
-
-    def output(self, decoder_output):
-        """
-        Perform the final output -> logits transformation.
-        """
-        return F.linear(decoder_output, self.embeddings.weight)
-
-    def reorder_encoder_states(self, encoder_states, indices):
-        """
-        Reorder the encoder states to select only the given batch indices.
-
-        Since encoder_state can be arbitrary, you must implement this yourself.
-        Typically you will just want to index select on the batch dimension.
-        """
-        h, c = encoder_states
-        return h[:, indices, :], c[:, indices, :]
-
-    def reorder_decoder_incremental_state(self, incr_state, indices):
-        """
-        Reorder the decoder states to select only the given batch indices.
-
-        This method can be a stub which always returns None; this will result in the
-        decoder doing a complete forward pass for every single token, making generation
-        O(n^2). However, if any state can be cached, then this method should be
-        implemented to reduce the generation complexity to O(n).
-        """
-        h, c = incr_state
-        return h[:, indices, :], c[:, indices, :]
-
-
-class IntervieweeAgent(tga.TorchGeneratorAgent):
-    """
-    Example agent.
-
-    Implements the interface for TorchGeneratorAgent. The minimum requirement is that it
-    implements ``build_model``, but we will want to include additional command line
-    parameters.
+    This agent uses the QA pretrained Teacher model from Qi et al 2020,
+    https://github.com/qipeng/stay-hungry-stay-focused as the interviewee.
+    This agent is only expected to be used for evaluation and reinforcement learning
+    If additional training is required, we would prefer to do the training with the original code
+    and then use the model in Parl AI.
     """
 
-    @classmethod
-    def add_cmdline_args(cls, argparser, partial_opt: Optional[Opt] = None) -> ParlaiParser:
+    @staticmethod
+    def dictionary_class():
         """
-        Add CLI arguments.
-        """
-        # Make sure to add all of TorchGeneratorAgent's arguments
-        super(IntervieweeAgent, cls).add_cmdline_args(argparser)
+        Return the dictionary class that this agent expects to use.
 
-        # Add custom arguments only for this model.
-        group = argparser.add_argument_group('Example TGA Agent')
-        group.add_argument(
-            '-hid', '--hidden-size', type=int, default=1024, help='Hidden size.'
-        )
+        Can be overriden if a more complex dictionary is required.
+        """
+        return IntervieweeDictionaryAgent
+
+    def load_teacher(self):
+        model = None
+        try:
+            print(f"Loading answerer/teacherriminator model from '{constants.TEACHER_FILE}'...")
+            config_path = os.path.join(self.opt['datapath'], constants.FINE_TUNE_FILE)
+            teacher_path = os.path.join(self.opt['datapath'], constants.TEACHER_FILE)
+            model_checkpoint = torch.load(config_path, lambda storage, loc: storage)
+            teacher_checkpoint = torch.load(teacher_path, lambda storage, loc: storage)
+            config = model_checkpoint['config']
+            config['teacher_elmo'] = False
+            model = TeacherModel(config, use_cuda=self.use_cuda)
+            model.load_state_dict(teacher_checkpoint['model'], strict=False)
+        except BaseException:
+            import pdb
+            pdb.set_trace()
+            print("Cannot answerer/teacherriminator load model from {}".format(constants.TEACHER_FILE))
+            sys.exit(1)
+        return model
 
     def build_model(self):
         """
         Construct the model.
         """
-
-        model = ExampleModel(self.dict, self.opt['hidden_size'])
-        # Optionally initialize pre-trained embeddings by copying them from another
-        # source: GloVe, fastText, etc.
-        self._copy_embeddings(model.embeddings.weight, self.opt['embedding_type'])
+        model = self.load_teacher()
         return model
+
+    # def batchify(self, obs_batch, sort=False):
+    #     pass
+    #
+    # def _model_input(self, batch):
+    #     pass
+
