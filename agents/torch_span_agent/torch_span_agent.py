@@ -47,6 +47,9 @@ class DialogueHistory(History):
         self.sep_last_utt = opt.get('sep_last_utt', False)
         super().__init__(opt, **kwargs)
         self.context = None
+        self.title = None
+        self.background = None
+        self.section_title = None
 
     def reset(self):
         """
@@ -57,6 +60,9 @@ class DialogueHistory(History):
         self.history_strings = []
         self.history_vecs = []
         self.context = None
+        self.title = None
+        self.background = None
+        self.section_title = None
 
     def _update_dialogues(self, text):
         """
@@ -86,8 +92,14 @@ class DialogueHistory(History):
             history.
         """
         if "text" in obs and obs["text"] is not None:
-            if not self.context:
+            if not self.context and obs.get('context', None):
                     self.context = obs['context']
+            if not self.background and obs.get('background', None):
+                    self.background = obs['background']
+            if not self.title and obs.get('title', None):
+                    self.title = obs['title']
+            if not self.section_title and obs.get('section_title', None):
+                    self.section_title = obs['section_title']
             text = obs['text']
             self._update_raw_strings(text)
             if self.add_person_tokens:
@@ -254,18 +266,16 @@ class TorchSpanAgent(TorchAgent):
         self.query_truncate = opt['query_maximum_length']
         self.context_truncate = opt['context_maximum_length']
         self.history_truncate = opt['history_maximum_length']
-        self.truncate = self.dict.tokenizer.model_max_length
+        try:
+            self.truncate = self.dict.tokenizer.model_max_length
+        except AttributeError:
+            self.truncate = 100000
         self.doc_stride = opt['doc_stride']
 
         if shared:
             self.model = shared['model']
         else:
             self.model = self.build_model()
-            self.criterion = self.build_criterion()
-            if self.model is None or self.criterion is None:
-                raise AttributeError(
-                    'build_model() and build_criterion() need to return the model or criterion'
-                )
             if init_model:
                 logging.info(f'Loading existing model parameters from {init_model}')
                 states = self.load(init_model)
@@ -280,8 +290,6 @@ class TorchSpanAgent(TorchAgent):
                     self.model.cuda()
                 if self.data_parallel:
                     self.model = torch.nn.DataParallel(self.model)
-                self.criterion.cuda()
-
             train_params = trainable_parameters(self.model)
             total_params = total_parameters(self.model)
             logging.info(

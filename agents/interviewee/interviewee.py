@@ -34,6 +34,13 @@ class IntervieweeDictionaryAgent(DictionaryAgent):
     def __len__(self):
         return self.vocab_size
 
+    def _index_lookup(self, key):
+        # return token from index, or unk_token
+        if key > self.vocab_size:
+            return self.unk_token
+        else:
+            return self.ind2tok[key]
+
     def load(self, filename):
         with open(filename, 'rb') as f:
             vocab = pickle.load(f)
@@ -54,16 +61,17 @@ class IntervieweeDictionaryAgent(DictionaryAgent):
         return True
 
     def _define_special_tokens(self, opt):
-        if opt["add_special_tokens"]:
-            # Add addtional start/end/pad tokens
-            # self.tokenizer.add_special_tokens(SPECIAL_TOKENS)
-            self.unk_token = constants.UNK
-            self.pad_token = constants.PAD
-            self.null_token = constants.PAD
-            self.end_token = constants.EOS
-            self.start_token = constants.SOS
+        self.unk_token = constants.UNK
+        self.pad_token = constants.PAD
+        self.null_token = constants.PAD
+        self.end_token = constants.EOS
+        self.start_token = constants.SOS
+        self.sep_token = constants.SEP
 
     def override_special_tokens(self, opt):
+        # Note that contants.SEP does not exist in the original teacher model.
+        # It is a temporary measure ro fulfull the history delimiator requirement
+        # , and will require to be replaced or removed before vectorization.
         # define special tokens
         self._define_special_tokens(opt)
         # now override
@@ -72,6 +80,9 @@ class IntervieweeDictionaryAgent(DictionaryAgent):
         self.null_idx = constants.PAD_ID
         self.end_idx = constants.EOS_ID
         self.start_idx = constants.SOS_ID
+        self.sep_idx = len(self.tok2ind)
+        self.tok2ind[self.sep_token] = self.sep_idx
+        self.ind2tok.append(self.sep_token)
 
     def bulk_tokenize(self, text, return_offsets=False):
         ann = list(self.nlp.pipe(text))
@@ -83,7 +94,7 @@ class IntervieweeDictionaryAgent(DictionaryAgent):
         return ann
 
     def tokenize(self, text, building=False):
-        return self.bulk_tokenize([text])
+        return self.bulk_tokenize([text])[0]
 
     def vec2txt(self, vector, delimiter=' '):
         """
@@ -158,6 +169,25 @@ class IntervieweeAgent(TorchSpanAgent):
         """
         model = self.load_teacher()
         return model
+
+    def build_history(self):
+        """
+        Return the constructed history object.
+        """
+        # Note that contants.SEP does not exist in the original teacher model.
+        # It is a temporary measure ro fulfull the history delimiator requirement
+        # , and will require to be replaced or removed before vectorization.
+        self.opt['delimiter'] = self.dict.sep_token
+        history = self.history_class()(
+            self.opt,
+            maxlen=self.text_truncate,
+            size=self.histsz,
+            p1_token=self.P1_TOKEN,
+            p2_token=self.P2_TOKEN,
+            dict_agent=self.dict,
+        )
+        history.delimiter_tok = self.dict.sep_idx
+        return history
 
     # def batchify(self, obs_batch, sort=False):
     #     pass

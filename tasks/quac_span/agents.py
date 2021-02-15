@@ -32,15 +32,7 @@ class DefaultTeacher(ParlAIDialogTeacher):
         ex = self.episodes[episode_idx][entry_idx]
         is_training = self.datatype == "train"
         qas_id = str(episode_idx) + "_" + str(entry_idx)
-        start_episode_text = self.episodes[episode_idx][0]['text']
-        article_end_index = start_episode_text.index(" CANNOTANSWER\n")
-        context_text = start_episode_text[:article_end_index]
-        # doc_tokens, char_to_word_offset = util.build_char_word_offset_list(context)
-        text = ex['text']
-        if entry_idx == 0:
-            question_text = text[article_end_index+14:]
-        else:
-            question_text = text
+        question_text = ex['text']
         answer_text = ex['labels'][0]
         start_position_character = None
         is_impossible = answer_text == NO_ANSWER_REPLY
@@ -56,25 +48,29 @@ class DefaultTeacher(ParlAIDialogTeacher):
         squad_example = SquadExample(
                         qas_id=qas_id,
                         question_text=question_text,
-                        context_text=context_text,
+                        context_text=self.episodes[episode_idx][0]['context'],
                         answer_text=answer_text,
                         start_position_character=start_position_character,
-                        title="unknown title",
+                        title=ex['title'],
                         is_impossible=is_impossible,
                         answers=answers,
                     )
 
         action = {
             'id': 'squad',
+            'turn_id': ex['turn_id'],
             'qas_id': qas_id,
             'labels': answers,
-            'context': context_text,
+            'context': ex['context'],
             'squad_example': squad_example,
             'single_label_text': answer_text,
             'episode_done': ex['episode_done'],
             'is_impossible': is_impossible,
             'text': question_text,
-            'no_answer_reply': NO_ANSWER_REPLY
+            'no_answer_reply': NO_ANSWER_REPLY,
+            'background': ex['background'],
+            'section_title': ex['section_title'],
+            'title': ex['title']
         }
         return action
 
