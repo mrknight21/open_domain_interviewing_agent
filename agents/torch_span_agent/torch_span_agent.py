@@ -47,9 +47,6 @@ class DialogueHistory(History):
         self.sep_last_utt = opt.get('sep_last_utt', False)
         super().__init__(opt, **kwargs)
         self.context = None
-        self.title = None
-        self.background = None
-        self.section_title = None
 
     def reset(self):
         """
@@ -60,9 +57,6 @@ class DialogueHistory(History):
         self.history_strings = []
         self.history_vecs = []
         self.context = None
-        self.title = None
-        self.background = None
-        self.section_title = None
 
     def _update_dialogues(self, text):
         """
@@ -94,12 +88,6 @@ class DialogueHistory(History):
         if "text" in obs and obs["text"] is not None:
             if not self.context and obs.get('context', None):
                     self.context = obs['context']
-            if not self.background and obs.get('background', None):
-                    self.background = obs['background']
-            if not self.title and obs.get('title', None):
-                    self.title = obs['title']
-            if not self.section_title and obs.get('section_title', None):
-                    self.section_title = obs['section_title']
             text = obs['text']
             self._update_raw_strings(text)
             if self.add_person_tokens:

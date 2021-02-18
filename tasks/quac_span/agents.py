@@ -42,8 +42,11 @@ class DefaultTeacher(ParlAIDialogTeacher):
                 start_position_character = int(ex["answer_starts"].split('|')[0])
             else:
                 start_position_character = int(ex["answer_starts"])
+            char_start_end = (start_position_character, start_position_character + len(answer_text))
         else:
             answers = [NO_ANSWER_REPLY]
+            char_start_end = (-1, -1)
+
 
         squad_example = SquadExample(
                         qas_id=qas_id,
@@ -66,11 +69,14 @@ class DefaultTeacher(ParlAIDialogTeacher):
             'single_label_text': answer_text,
             'episode_done': ex['episode_done'],
             'is_impossible': is_impossible,
+            'followup': ex['followup'],
+            'yesno': ex['yesno'],
             'text': question_text,
             'no_answer_reply': NO_ANSWER_REPLY,
             'background': ex['background'],
             'section_title': ex['section_title'],
-            'title': ex['title']
+            'title': ex['title'],
+            'character_start_end': char_start_end
         }
         return action
 
