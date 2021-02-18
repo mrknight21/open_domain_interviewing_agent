@@ -534,8 +534,6 @@ class IntervieweeAgent(TorchSpanAgent):
             if content is not None and type(content) == torch.Tensor:
                 batch[k] = content.cuda()
         return batch
-
-        return batch
         
     def _collate_fn(self, obs_batch):
         batch_data = [x['text_vec'] for x in obs_batch]
