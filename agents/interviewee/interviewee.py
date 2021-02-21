@@ -13,6 +13,7 @@ from parlai.core.torch_agent import Optional, Batch
 from parlai_internal.agents.torch_span_agent.torch_span_agent import TorchSpanAgent, DialogueHistory
 from parlai_internal.agents.interviewee.models.seq2seq import TeacherModel
 from parlai_internal.agents.interviewee import constants
+from parlai_internal.agents.interviewee.models.trainer import unpack_batch
 import pickle
 from parlai.core.opt import Opt
 
@@ -515,6 +516,9 @@ class IntervieweeAgent(TorchSpanAgent):
             src=retval['src'],
             src_char=retval['src_char'],
             src_text=retval['src_text'],
+            bg=retval['bg'],
+            bg_char=retval['bg_char'],
+            bg_text=retval['bg_text'],
             tgt_in=retval['tgt_in'],
             tgt_out=retval['tgt_out'],
             tgt_out_char=retval['tgt_out_char'],
@@ -530,9 +534,6 @@ class IntervieweeAgent(TorchSpanAgent):
             this_turn=retval['this_turn'],
             ans_mask=retval['ans_mask']
         )
-        for k, content in batch.items():
-            if content is not None and type(content) == torch.Tensor:
-                batch[k] = content.cuda()
         return batch
         
     def _collate_fn(self, obs_batch):
@@ -585,5 +586,22 @@ class IntervieweeAgent(TorchSpanAgent):
             retval['bg_text'] = [x['bg_text'] for x in batch_data]
         return retval
 
-    # def _model_input(self, batch):
-    #     pass
+    def _model_input(self, batch):
+        inputs = unpack_batch(batch, self.use_cuda)
+        inputs = {k: c for k, c in inputs.items() if c is not None}
+        src, tgt_in, tgt_out, turn_ids, ctx = \
+            inputs['src'], inputs['tgt_in'], inputs['tgt_out'], inputs['turn_ids'], inputs['ctx']
+        bg = inputs.get('bg', None)
+        src_mask = src.eq(constants.PAD_ID)
+        bg_mask = bg.eq(constants.PAD_ID) if bg is not None else None
+        batch_size = batch.batchsize
+        return {'src': src, 'src_mask': src_mask, 'turn_ids': turn_ids, 'tgt_in': tgt_in,
+                'bg': bg, 'bg_mask': bg_mask, 'tgt_out': tgt_out, 'ctx': ctx, 'ans_mask': inputs['ans_mask'],
+                'start': inputs['start'], 'end': inputs['end'], 'this_turn': inputs['this_turn'],
+                'src_char': inputs['src_char'], 'tgt_out_char': inputs['tgt_out_char'], 'ctx_char': inputs['ctx_char'],
+                'bg_char': inputs.get('bg_char', None), 'yesno': inputs['yesno'], 'followup': inputs['followup'],
+                'src_text': batch.src_text, 'bg_text': batch.bg_text,
+                'tgt_text': batch.tgt_text, 'ctx_text': batch.ctx_text}
+
+    def compute_loss(self, batch, return_output=False):
+        teacher_loss, teacher_acc = self.model(**self._model_input(batch))[:2]

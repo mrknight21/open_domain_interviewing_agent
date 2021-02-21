@@ -2,7 +2,7 @@
 This file contains the data pipeline for the models.
 """
 
-from allennlp.commands.elmo import ElmoEmbedder
+# from allennlp.commands.elmo import ElmoEmbedder
 from collections import defaultdict
 import json
 import numpy as np
@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 from tqdm import tqdm
 
-from utils.constants import *
+from parlai_internal.agents.interviewee.constants import *
 
 MAX_SKETCHES = 5
 

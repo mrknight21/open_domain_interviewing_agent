@@ -383,7 +383,7 @@ class TorchSpanAgent(TorchAgent):
         max_answer_length = 50
         null_score_diff_threshold = 0.0
         tokenizer = self.dict.tokenizer
-        if batch.batch_indexes_map is None:
+        if batch.batchsize <= 0:
             return
         else:
             bsz = batch.batchsize
@@ -472,14 +472,6 @@ class TorchSpanAgent(TorchAgent):
                     orig_tokens = example.doc_tokens[orig_doc_start: (orig_doc_end + 1)]
 
                     tok_text = tokenizer.convert_tokens_to_string(tok_tokens)
-
-                    # tok_text = " ".join(tok_tokens)
-                    #
-                    # # De-tokenize WordPieces that have been split off.
-                    # tok_text = tok_text.replace(" ##", "")
-                    # tok_text = tok_text.replace("##", "")
-
-                    # Clean whitespace
                     tok_text = tok_text.strip()
                     tok_text = " ".join(tok_text.split())
                     orig_text = " ".join(orig_tokens)

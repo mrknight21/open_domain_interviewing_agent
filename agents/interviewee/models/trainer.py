@@ -11,8 +11,8 @@ from torch import nn
 import torch.nn.init as init
 
 import stanza.models.common.seq2seq_constant as constant
-from models.seq2seq import Seq2SeqModel, TeacherModel
-from models.data import pad_char_start_end
+from parlai_internal.agents.interviewee.models.seq2seq import Seq2SeqModel, TeacherModel
+from parlai_internal.agents.interviewee.models.data import pad_char_start_end
 from stanza.models.common import utils
 
 def unpack_batch(batch, use_cuda):
