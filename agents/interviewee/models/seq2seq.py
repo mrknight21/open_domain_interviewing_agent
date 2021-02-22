@@ -75,7 +75,7 @@ def encode(enc_inputs, lens, encoder, h0=None, c0=None, use_cuda=True, concat_di
     else:
         batch_size = enc_inputs.size(0)
         enc_inputs = enc_inputs.masked_select(mask.unsqueeze(1).unsqueeze(2)).view(-1, *enc_inputs.size()[1:])
-        lens = lens.masked_select(mask)
+        lens = lens.masked_select(mask).cpu()
         h0_ = h0.masked_select(mask.unsqueeze(0).unsqueeze(2)).view(h0.size(0), -1, h0.size(2))
         c0_ = c0.masked_select(mask.unsqueeze(0).unsqueeze(2)).view(c0.size(0), -1, c0.size(2))
 
@@ -459,15 +459,8 @@ class CompositeEmbedding(nn.Module):
         self.char_embedding = nn.Embedding(args['char_vocab_size'], args['char_emb_dim'], padding_idx=self.pad_token)
         self.char_embedding.weight.register_hook(lambda x: keep_partial_grad(x))
         self.char_conv = nn.Conv1d(args['char_emb_dim'], args['char_hidden_dim'], args['char_conv_size'], padding=args['char_conv_size'])
-
-        if use_elmo:
-            options_file = "https://allennlp.s3.amazonaws.com/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
-            weight_file = "https://allennlp.s3.amazonaws.com/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
-
-            self.elmo = Elmo(options_file, weight_file, 1, dropout=dropout, vocab_to_cache=args['vocab']['id2word'])
-        else:
-            self.embedding = nn.Embedding(self.vocab_size, self.emb_dim, padding_idx=self.pad_token)
-            self.init_weights()
+        self.embedding = nn.Embedding(self.vocab_size, self.emb_dim, padding_idx=self.pad_token)
+        self.init_weights()
 
     def init_weights(self):
         # initialize embeddings
@@ -617,7 +610,7 @@ def get_logits(self, h_src, h_ctx, h_bg, src_mask, ctx_mask, bg_mask, tgt_out, t
     return logit, start_logit, end_logit, yesno_logit, followup_logit, nll
 
 class TeacherModel(nn.Module):
-    def __init__(self, args, emb_matrix=None, use_cuda=False):
+    def __init__(self, args, emb_matrix=None, use_cuda=False, negative_sampling=False, is_interviewee=True):
         super().__init__()
         self.vocab_size = args['vocab_size']
         self.emb_dim = args['emb_dim']
@@ -693,6 +686,8 @@ class TeacherModel(nn.Module):
         self.tgt_lm = nn.GRU(self.emb_dim, self.hidden_dim, 1, batch_first=True)
         self.lm_hid_to_vocab = nn.Linear(self.hidden_dim, self.vocab_size)
         self.lm_crit = nn.CrossEntropyLoss(ignore_index=0)
+        self.negative_sampling = negative_sampling
+        self.is_interviewee = is_interviewee
 
     def cuda(self):
         super().cuda()
@@ -703,7 +698,7 @@ class TeacherModel(nn.Module):
         self.use_cuda = False
 
     def forward(self, src, src_mask, turn_ids, tgt_in, bg=None, bg_mask=None, neg_in=None, neg_out=None, tgt_out=None, reward_only=False, ctx=None, ans_mask=None, start=None, end=None, this_turn=None,
-            src_char=None, tgt_out_char=None, bg_char=None, ctx_char=None, neg_out_char=None, ctx_elmo=None, tgt_out_elmo=None, neg_out_elmo=None,
+            src_char=None, tgt_out_char=None, bg_char=None, ctx_char=None, neg_out_char=None,
             yesno=None, followup=None, ctx_text=None, tgt_text=None, src_text=None, neg_text=None, bg_text=None, return_all_rewards=False):
 
         loss = acc = 0
@@ -766,26 +761,28 @@ class TeacherModel(nn.Module):
         ctx_lens = (ctx != 0).sum(1)
         h_ctx, _ = encode(self.emb_drop(ctx_emb), ctx_lens, encoder=self.ctx_encoder)
 
-
-        B, T, L, C = tgt_out_char.size()
-        max_turns = this_turn.view(B, T).max(1, keepdim=True)[0]
-        idx = torch.randint(32768, (B, T), device=this_turn.device) % max_turns
-        idx = torch.where(idx >= this_turn.view(B, T), idx+1, idx)
-        neg2_out = tgt_out.gather(1, idx.unsqueeze(2).expand(B, T, tgt_out.size(2)))
-        neg2_out_char = tgt_out_char.gather(1, idx.unsqueeze(2).unsqueeze(3).expand(B, T, tgt_out.size(2), tgt_out_char.size(3)))
-        maxlen = neg2_out.ne(0).sum(2).max()
-        neg2_out = neg2_out[:, :, :maxlen].contiguous()
-        neg2_out_char = neg2_out_char[:, :, :maxlen].contiguous()
-        neg2_text = [[tgt_text[i][j] for j in x] for i, x in enumerate(idx.tolist())]
-
         if bg is not None:
             h_bg = h_bg.unsqueeze(1).repeat(1, T, 1, 1).contiguous().view(-1, h_bg.size(1), h_bg.size(2))
             bg_mask = bg_mask.unsqueeze(1).repeat(1, T, 1).contiguous().view(-1, bg_mask.size(1))
 
         # randomize evaluation order to counter the effect of AllenNLP ELMo's statefulness
         logit_pos, start_logits_pos, end_logits_pos, yesno_pos, followup_pos, nll_pos = get_logits(self, h_in, h_ctx, h_bg, src_mask, ctx_mask, bg_mask, tgt_out, tgt_out_char, tgt_text, this_turn, ctx_lens)
-        logit_neg, start_logits_neg, end_logits_neg, _, _, nll_neg = get_logits(self, h_in, h_ctx, h_bg, src_mask, ctx_mask, bg_mask, neg_out, neg_out_char, neg_text, this_turn, ctx_lens, skip_qa_model=not reward_only)
-        logit_neg2, start_logits_neg2, end_logits_neg2, _, _, _ = get_logits(self, h_in, h_ctx, h_bg, src_mask, ctx_mask, bg_mask, neg2_out, neg2_out_char, neg2_text, this_turn, ctx_lens, skip_qa_model=not reward_only)
+
+        # randomized negative sampling
+        if self.negative_sampling:
+            B, T, L, C = tgt_out_char.size()
+            max_turns = this_turn.view(B, T).max(1, keepdim=True)[0]
+            idx = torch.randint(32768, (B, T), device=this_turn.device) % max_turns
+            idx = torch.where(idx >= this_turn.view(B, T), idx + 1, idx)
+            neg2_out = tgt_out.gather(1, idx.unsqueeze(2).expand(B, T, tgt_out.size(2)))
+            neg2_out_char = tgt_out_char.gather(1, idx.unsqueeze(2).unsqueeze(3).expand(B, T, tgt_out.size(2),
+                                                                                        tgt_out_char.size(3)))
+            maxlen = neg2_out.ne(0).sum(2).max()
+            neg2_out = neg2_out[:, :, :maxlen].contiguous()
+            neg2_out_char = neg2_out_char[:, :, :maxlen].contiguous()
+            neg2_text = [[tgt_text[i][j] for j in x] for i, x in enumerate(idx.tolist())]
+            logit_neg, start_logits_neg, end_logits_neg, _, _, nll_neg = get_logits(self, h_in, h_ctx, h_bg, src_mask, ctx_mask, bg_mask, neg_out, neg_out_char, neg_text, this_turn, ctx_lens, skip_qa_model=not reward_only)
+            logit_neg2, start_logits_neg2, end_logits_neg2, _, _, _ = get_logits(self, h_in, h_ctx, h_bg, src_mask, ctx_mask, bg_mask, neg2_out, neg2_out_char, neg2_text, this_turn, ctx_lens, skip_qa_model=not reward_only)
 
         start = start.view(-1)
         end = end.view(-1)
@@ -835,102 +832,62 @@ class TeacherModel(nn.Module):
 
             return f1
 
+        def max_prec(st_gold, en_gold, st_pred, en_pred, cannotanswer, cannotanswer_pred, ctx_text):
+            batch_size = ans_mask.size(0)
+            max_turns = batch_size // len(ctx_text)
+
+            prec = []
+
+            cannotanswer_mask = (cannotanswer_pred).cpu()
+
+            for idx, (sg, eg, sp, ep, cm) in enumerate(zip(st_gold.cpu(), en_gold.cpu(), st_pred.cpu(), en_pred.cpu(), cannotanswer_mask)):
+                if cm:
+                    prec.append(1)
+                    continue
+                ct = ctx_text[idx // max_turns]
+                p = ct[sp:ep+1]
+
+                golds = []
+                for j in range(ans_mask.size(-1)):
+                    if eg[j] < 0:
+                        break
+                    golds.append(' '.join(ct[sg[j]:eg[j]+1]))
+
+                if len(golds) == 0:
+                    prec.append(0)
+                else:
+                    prec.append(squad_eval.metric_max_over_ground_truths(cached_prec, ' '.join(p), golds))
+
+            prec = torch.Tensor(prec).to(ans_mask.device)
+
+            return prec
         start_pos, end_pos = start_end_logits_to_offsets(start_logits_pos, end_logits_pos)
         cannotanswer_pos = (start_pos == end_pos) & (end_pos == (ctx_lens - 1)) # last token is CANNOTANSWER
-
         example_mask = (yesno >= 0)
+        reward = 0
+        f1 = offsets_to_f1(start, end, start_pos, end_pos, ctx_text)
+        acc = (acc, f1.masked_select(example_mask).mean().item())
+        end1 = end.masked_fill(end < 0, ctx.size(1) - 1)
+        yesno = yesno.masked_fill(end < 0, -1)
+        followup = followup.masked_fill(end < 0, -1)
+        non_example_mask = example_mask.bitwise_not()
 
-        if not reward_only:
-            reward_pos = reward_neg = 0
-            logits0 = torch.cat([logit_pos, logit_neg, logit_neg2], 0)
-            logits = torch.cat([logits0.new_zeros(logits0.size(0), 1), logits0.unsqueeze(1)], 1)
-            labels = torch.cat([logit_pos.new_ones(logit_pos.size(), dtype=torch.long).masked_fill(src_lens == 0, -1),
-                logit_neg.new_zeros(logit_neg.size(), dtype=torch.long).masked_fill(src_lens == 0, -1),
-                logit_neg2.new_zeros(logit_neg2.size(), dtype=torch.long).masked_fill(src_lens == 0, -1)], 0)
+        yesno_pos = torch.gather(yesno_pos, 1, end1.unsqueeze(1).unsqueeze(2).expand(end.size(0), 1, yesno_pos.size(-1))).squeeze(1)
+        followup_pos = torch.gather(followup_pos, 1, end1.unsqueeze(1).unsqueeze(2).expand(end.size(0), 1, followup_pos.size( -1))).squeeze(1)
+        loss += self.crit(yesno_pos, yesno) + self.crit(followup_pos, followup) + nll_pos
 
-            tp = (logits0 > 0)[:logit_pos.size(0)].masked_select(example_mask).float().sum()
-            prec = tp / ((logits0 > 0).float().sum() + 1e-12)
-            recall = tp / ((labels > 0).sum().float() + 1e-12)
-            clf_f1 = 2 * prec * recall / (prec + recall + 1e-12)
+        ans_mask = ans_mask > 0
+        t = torch.arange(ans_mask.size(1), device=ans_mask.device).unsqueeze(1).unsqueeze(0).expand(ans_mask.size())
+        en = t.masked_fill(ans_mask.bitwise_not(), -1).max(1)[0]
+        st = t.masked_fill(ans_mask.bitwise_not(), 1e10).min(1)[0]
 
-            f1 = offsets_to_f1(start, end, start_pos, end_pos, ctx_text)
-            acc = (clf_f1.item(), f1.masked_select(example_mask).mean().item(), -nll_pos.item())
-
-            end1 = end.masked_fill(end < 0, ctx.size(1)-1)
-
-            loss = self.clf_crit(logits, labels) + self.crit(start_logits_pos, start) + self.crit(end_logits_pos, end)
-
-            yesno = yesno.masked_fill(end < 0, -1)
-            followup = followup.masked_fill(end < 0, -1)
-
-            yesno_pos = torch.gather(yesno_pos, 1, end1.unsqueeze(1).unsqueeze(2).expand(end.size(0), 1, yesno_pos.size(-1))).squeeze(1)
-            followup_pos = torch.gather(followup_pos, 1, end1.unsqueeze(1).unsqueeze(2).expand(end.size(0), 1, followup_pos.size(-1))).squeeze(1)
-
-            loss += self.crit(yesno_pos, yesno) + self.crit(followup_pos, followup) + nll_pos
-        else:
-            f1 = offsets_to_f1(start, end, start_pos, end_pos, ctx_text)
-            acc = (acc, f1.masked_select(example_mask).mean().item())
-
-            non_example_mask = example_mask.bitwise_not()
-            logit_pos = torch.sigmoid(logit_pos).masked_fill(non_example_mask, 0)
-
-            # overlap with existing answers
-            start_neg, end_neg = start_end_logits_to_offsets(start_logits_neg, end_logits_neg)
-            cannotanswer_neg = (start_neg == end_neg) & (end_neg == (ctx_lens - 1)) # last token is CANNOTANSWER
-            logit_neg = torch.sigmoid(logit_neg).masked_fill(non_example_mask, 0)
-
-            ans_mask = ans_mask > 0
-            t = torch.arange(ans_mask.size(1), device=ans_mask.device).unsqueeze(1).unsqueeze(0).expand(ans_mask.size())
-            en = t.masked_fill(ans_mask.bitwise_not(), -1).max(1)[0]
-            st = t.masked_fill(ans_mask.bitwise_not(), 1e10).min(1)[0]
-            def max_prec(st_gold, en_gold, st_pred, en_pred, cannotanswer, cannotanswer_pred, ctx_text):
-                batch_size = ans_mask.size(0)
-                max_turns = batch_size // len(ctx_text)
-
-                prec = []
-
-                cannotanswer_mask = (cannotanswer_pred).cpu()
-
-                for idx, (sg, eg, sp, ep, cm) in enumerate(zip(st_gold.cpu(), en_gold.cpu(), st_pred.cpu(), en_pred.cpu(), cannotanswer_mask)):
-                    if cm:
-                        prec.append(1)
-                        continue
-                    ct = ctx_text[idx // max_turns]
-                    p = ct[sp:ep+1]
-
-                    golds = []
-                    for j in range(ans_mask.size(-1)):
-                        if eg[j] < 0:
-                            break
-                        golds.append(' '.join(ct[sg[j]:eg[j]+1]))
-
-                    if len(golds) == 0:
-                        prec.append(0)
-                    else:
-                        prec.append(squad_eval.metric_max_over_ground_truths(cached_prec, ' '.join(p), golds))
-
-                prec = torch.Tensor(prec).to(ans_mask.device)
-
-                return prec
-            pos_novelty = 1 - max_prec(st, en, start_pos, end_pos, cannotanswer, cannotanswer_pos, ctx_text)
-            neg_novelty = 1 - max_prec(st, en, start_neg, end_neg, cannotanswer, cannotanswer_neg, ctx_text)
-
-            pos_novelty = pos_novelty.masked_fill(non_example_mask, 0)
-            neg_novelty = neg_novelty.masked_fill(non_example_mask, 0)
-
-            logit_adv = logit_pos - logit_neg
-            novelty_adv = pos_novelty - neg_novelty
-            if self.args['teacher_spec_only']:
-                reward_pos = logit_pos
-                reward_neg = logit_neg
-            elif self.args['teacher_info_only']:
-                reward_pos = pos_novelty
-                reward_neg = neg_novelty
-            else:
-                reward_pos = self.args['lambda1'] * logit_pos + (1 - self.args['lambda1']) * pos_novelty
-                reward_neg = self.args['lambda1'] * logit_neg + (1 - self.args['lambda1']) * neg_novelty
-
-        if return_all_rewards:
-            return loss, acc, reward_pos, reward_neg, logit_pos, logit_neg, pos_novelty, neg_novelty, nll_pos, nll_neg
-        else:
-            return loss, acc, reward_pos, reward_neg
+        pos_novelty = 1 - max_prec(st, en, start_pos, end_pos, cannotanswer, cannotanswer_pos, ctx_text)
+        pos_novelty = pos_novelty.masked_fill(non_example_mask, 0)
+        reward = self.args['lambda1'] * logit_pos + (1 - self.args['lambda1']) * pos_novelty
+        reward_items = {"novelty": pos_novelty, 'specificity': logit_pos}
+        stats = {'acc': acc, 'f1': f1}
+        pred_text = [" ".join(ctx_text[idx][s:e+1]) if not cm else ctx_text[idx][-1] for idx, (s, e, cm) in enumerate(zip(start_pos.cpu(), end_pos.cpu(), cannotanswer_pos.cpu()))]
+        preds = {'logits': {'start': start_logits_pos, 'end': end_logits_pos,
+                            'yesno': yesno_pos, 'followup': followup_pos},
+                 'outputs': pred_text}
+        return loss, reward, reward_items, stats, preds

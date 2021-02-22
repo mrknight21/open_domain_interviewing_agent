@@ -9,9 +9,10 @@ import numpy as np
 import parlai.utils.logging as logging
 from parlai.core.dict import DictionaryAgent
 from parlai.core.message import Message
-from parlai.core.torch_agent import Optional, Batch
+from parlai.core.torch_agent import Optional, Batch, Output
 from parlai_internal.agents.torch_span_agent.torch_span_agent import TorchSpanAgent, DialogueHistory
 from parlai_internal.agents.interviewee.models.seq2seq import TeacherModel
+from parlai.core.metrics import AverageMetric
 from parlai_internal.agents.interviewee import constants
 from parlai_internal.agents.interviewee.models.trainer import unpack_batch
 import pickle
@@ -509,9 +510,11 @@ class IntervieweeAgent(TorchSpanAgent):
         valid_obs = [(i, ex) for i, ex in enumerate(obs_batch) if self.is_valid(ex)]
         if len(valid_obs) == 0:
             return batch
+        valid_inds, exs = zip(*valid_obs)
         retval = self._collate_fn(obs_batch)
         batch = Batch(
             batchsize=len(valid_obs),
+            valid_indices=valid_inds,
             no_answer_reply=obs_batch[0].get('no_answer_reply', 'CANNOTANSWER'),
             src=retval['src'],
             src_char=retval['src_char'],
@@ -565,9 +568,6 @@ class IntervieweeAgent(TorchSpanAgent):
                   'tgt_out': tgt_out,
                   'tgt_out_char': tgt_out_char,
                   'tgt_text': [x['tgt_text'] for x in batch_data],
-                  # 'neg_out': neg_out,
-                  # 'neg_out_char': neg_out_char,
-                  # 'neg_text': [x['neg_text'] for x in batch_data],
                   'turn_ids': turn_ids,
                   'ctx': ctx,
                   'ctx_char': ctx_char,
@@ -604,4 +604,22 @@ class IntervieweeAgent(TorchSpanAgent):
                 'tgt_text': batch.tgt_text, 'ctx_text': batch.ctx_text}
 
     def compute_loss(self, batch, return_output=False):
-        teacher_loss, teacher_acc = self.model(**self._model_input(batch))[:2]
+        loss, reward, reward_items, stats, preds = self.model(**self._model_input(batch))
+        outputs = {'reward': reward, 'reward_items': reward_items, 'stats': stats, 'pred':preds}
+        batches_count = [1] * batch.batchsize
+        self.record_local_metric('loss',
+                                 AverageMetric.many([loss.data.cpu()] * batch.batchsize, batches_count))
+        if return_output:
+            return loss, outputs
+        else:
+            return loss
+
+    def eval_step(self, batch):
+        if batch.batchsize <= 0:
+            return
+        else:
+            bsz = batch.batchsize
+        self.model.eval()
+        loss, outputs = self.compute_loss(batch, return_output=True)
+        batch_best_preds = outputs['pred']['outputs']
+        return Output(batch_best_preds)
