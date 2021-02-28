@@ -26,12 +26,15 @@ class IntervieweeHistory(DialogueHistory):
         self.title = None
         self.background = None
         self.section_title = None
+        self.history_cache = []
+        self.print_text = TeacherModel
 
     def reset(self):
         """
         Clear the history.
         """
         self.history_raw_strings = []
+        self.history_cache = []
         self.history_dialogues = []
         self.history_strings = []
         self.history_vecs = []
@@ -39,6 +42,12 @@ class IntervieweeHistory(DialogueHistory):
         self.title = None
         self.background = None
         self.section_title = None
+
+    def _update_cache(self, obs):
+        cache = {
+            'character_start_end': obs['character_start_end'],
+            'yesno': obs['yesno'], 'followup': obs['followup']}
+        self.history_cache.append(cache)
 
     def update_history(self, obs: Message, temp_history: Optional[str] = None):
         """
@@ -73,6 +82,7 @@ class IntervieweeHistory(DialogueHistory):
             self._update_dialogues(text)
             # update history vecs
             self._update_vecs(text)
+            self._update_cache(obs)
         self.temp_history = temp_history
 
 
@@ -409,7 +419,9 @@ class IntervieweeAgent(TorchSpanAgent):
         return datum
 
     def tokenize_one(self, item):
-        strings_to_tokenize = [item['title'], item['section_title'], item['context'], item['background']]
+        strings_to_tokenize = [self.history.title, self.history.section_title, self.history.context, self.history.background]
+        if self.history.section_title == 'Eagles':
+            print('hi')
         qas = []
         if len(self.history.history_dialogues) > 1:
             for qa in self.history.history_dialogues[:-1]:
@@ -425,39 +437,36 @@ class IntervieweeAgent(TorchSpanAgent):
         ctx_offsets = [(st-offsets[2][0][0], en-offsets[2][0][0]) for st, en in offsets[2]]
         parsed_idx = 0
         for idx, qa in enumerate(qas):
-            yesno = None
-            followup = None
+            cache = self.history.history_cache[idx]
+            item_yesno = cache.get('yesno')
+            item_followup = cache.get('followup')
             ans_st = -1
             ans_en = -1
-            if idx == len(qas) -1:
-                ans = tokenized[1]
-                if item['yesno'] == '__YES__':
-                    ans = ['Yes', ','] + tokenized[1]
-                    yesno = constants.YESNO_TO_ID['y']
-                elif item['yesno'] == '__NO__':
-                    ans = ['No', ','] + tokenized[1]
-                    yesno = constants.YESNO_TO_ID['n']
-                else:
-                    yesno = constants.YESNO_TO_ID['x']
-                if item['followup'] == '__SHOULDNOT__':
-                    followup = constants.FOLLOWUP_TO_ID['n']
-                elif item['followup'] == '__SHOULD__':
-                    followup = constants.FOLLOWUP_TO_ID['f']
-                else:
-                    followup = constants.FOLLOWUP_TO_ID['m']
-
-                char_st = item['character_start_end'][0]
-                char_en = item['character_start_end'][-1]
-                for idx, (st, en) in enumerate(ctx_offsets):
-                    if en > char_st and ans_st < 0:
-                        ans_st = idx
-                    if st >= char_en and ans_en < 0:
-                        ans_en = idx
-                if ans_en < 0:
-                    ans_en = len(ctx_offsets)
-                assert ''.join(tokenized[1]) in ''.join(retval['context'][ans_st:ans_en]), '{} {}'.format(str(retval['context'][ans_st:ans_en]), str(tokenized[1]))
+            char_st = cache.get('character_start_end')[0]
+            char_en = cache.get('character_start_end')[1]
+            ans = tokenized[1]
+            if item_yesno == '__YES__':
+                ans = ['Yes', ','] + tokenized[1]
+                yesno = constants.YESNO_TO_ID['y']
+            elif item_yesno == '__NO__':
+                ans = ['No', ','] + tokenized[1]
+                yesno = constants.YESNO_TO_ID['n']
             else:
-                ans = tokenized[1]
+                yesno = constants.YESNO_TO_ID['x']
+            if item_followup == '__SHOULDNOT__':
+                followup = constants.FOLLOWUP_TO_ID['n']
+            elif item_followup == '__SHOULD__':
+                followup = constants.FOLLOWUP_TO_ID['f']
+            else:
+                followup = constants.FOLLOWUP_TO_ID['m']
+            for idj, (st, en) in enumerate(ctx_offsets):
+                if en > char_st and ans_st < 0:
+                    ans_st = idj
+                if st >= char_en and ans_en < 0:
+                    ans_en = idj
+            if ans_en < 0:
+                ans_en = len(ctx_offsets)
+            assert ''.join(tokenized[1]) in ''.join(retval['context'][ans_st:ans_en]), '{} {}'.format(str(retval['context'][ans_st:ans_en]), str(tokenized[1]))
             retval['qas'].append({'question': tokenized[0], 'answer': ans,
             'start': ans_st, 'end': ans_en, 'yesno': yesno, 'followup': followup})
             tokenized = tokenized[2:]
@@ -511,6 +520,7 @@ class IntervieweeAgent(TorchSpanAgent):
         if len(valid_obs) == 0:
             return batch
         valid_inds, exs = zip(*valid_obs)
+        src_text_numb = [len(obs['text_vec']['src_text']) for obs in obs_batch]
         retval = self._collate_fn(obs_batch)
         batch = Batch(
             batchsize=len(valid_obs),
@@ -556,10 +566,10 @@ class IntervieweeAgent(TorchSpanAgent):
         ans_mask = torch.from_numpy(self.pad_lists([x['ans_mask'] for x in batch_data]))
 
         turn_ids = torch.from_numpy(self.pad_lists([x['turn_ids'] for x in batch_data], fill_val=-1))
-        start = torch.from_numpy(self.pad_lists([x['start'] for x in batch_data], fill_val=-1))
-        end = torch.from_numpy(self.pad_lists([x['end'] for x in batch_data], fill_val=-1))
-        yesno = torch.from_numpy(self.pad_lists([x['yesno'] for x in batch_data], fill_val=-1))
-        followup = torch.from_numpy(self.pad_lists([x['followup'] for x in batch_data], fill_val=-1))
+        start = torch.from_numpy(self.pad_lists([[x['start'][-1]] for x in batch_data], fill_val=-1))
+        end = torch.from_numpy(self.pad_lists([[x['end'][-1]] for x in batch_data], fill_val=-1))
+        yesno = torch.from_numpy(self.pad_lists([[x['yesno'][-1]] for x in batch_data], fill_val=-1))
+        followup = torch.from_numpy(self.pad_lists([[x['followup'][-1]] for x in batch_data], fill_val=-1))
 
         retval = {'src': src,
                   'src_char': src_char,

@@ -765,8 +765,15 @@ class TeacherModel(nn.Module):
             h_bg = h_bg.unsqueeze(1).repeat(1, T, 1, 1).contiguous().view(-1, h_bg.size(1), h_bg.size(2))
             bg_mask = bg_mask.unsqueeze(1).repeat(1, T, 1).contiguous().view(-1, bg_mask.size(1))
 
-        # randomize evaluation order to counter the effect of AllenNLP ELMo's statefulness
         logit_pos, start_logits_pos, end_logits_pos, yesno_pos, followup_pos, nll_pos = get_logits(self, h_in, h_ctx, h_bg, src_mask, ctx_mask, bg_mask, tgt_out, tgt_out_char, tgt_text, this_turn, ctx_lens)
+
+        # Only want to obtain the prediction for this turn
+        this_turn_bool = this_turn == this_turn.max()
+        logit_pos = logit_pos[this_turn_bool]
+        start_logits_pos = start_logits_pos[this_turn_bool]
+        end_logits_pos = end_logits_pos[this_turn_bool]
+        yesno_pos = yesno_pos[this_turn_bool]
+        followup_pos = followup_pos[this_turn_bool]
 
         # randomized negative sampling
         if self.negative_sampling:
@@ -791,7 +798,7 @@ class TeacherModel(nn.Module):
 
         start = start.masked_fill(start >= ctx.size(1), -1)
         end = (end-1).masked_fill(end-1 >= ctx.size(1), -1).masked_fill(end < 0, -1)
-        cannotanswer = (start == end) & (start == (ctx_lens - 1))
+        cannotanswer = (start == end) & (start == (ctx_lens[this_turn_bool] - 1))
 
         def start_end_logits_to_offsets(start_logits, end_logits, max_span_length=30):
             batch_size, paragraph_length = start_logits.size()
@@ -862,7 +869,7 @@ class TeacherModel(nn.Module):
 
             return prec
         start_pos, end_pos = start_end_logits_to_offsets(start_logits_pos, end_logits_pos)
-        cannotanswer_pos = (start_pos == end_pos) & (end_pos == (ctx_lens - 1)) # last token is CANNOTANSWER
+        cannotanswer_pos = (start_pos == end_pos) & (end_pos == (ctx_lens[this_turn_bool] - 1)) # last token is CANNOTANSWER
         example_mask = (yesno >= 0)
         reward = 0
         f1 = offsets_to_f1(start, end, start_pos, end_pos, ctx_text)

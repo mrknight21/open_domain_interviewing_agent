@@ -36,16 +36,16 @@ class DefaultTeacher(ParlAIDialogTeacher):
         answer_text = ex['labels'][0]
         start_position_character = None
         is_impossible = answer_text == NO_ANSWER_REPLY
-        if not is_impossible:
-            answers = ex['labels']
-            if not is_training:
-                start_position_character = int(ex["answer_starts"].split('|')[0])
-            else:
-                start_position_character = int(ex["answer_starts"])
-            char_start_end = (start_position_character, start_position_character + len(answer_text))
+        # if not is_impossible:
+        answers = ex['labels']
+        if not is_training:
+            start_position_character = int(ex["answer_starts"].split('|')[0])
         else:
-            answers = [NO_ANSWER_REPLY]
-            char_start_end = (-1, -1)
+            start_position_character = int(ex["answer_starts"])
+        char_start_end = (start_position_character, start_position_character + len(answer_text))
+        # else:
+        #     answers = [NO_ANSWER_REPLY]
+        #     char_start_end = (-1, -1)
 
 
         squad_example = SquadExample(

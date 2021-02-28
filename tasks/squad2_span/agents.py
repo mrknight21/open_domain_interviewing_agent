@@ -1,6 +1,5 @@
 
 from parlai.tasks.squad2.agents import IndexTeacher
-from parlai_internal.utilities import util
 from transformers.data.processors.squad import SquadExample
 
 import copy
