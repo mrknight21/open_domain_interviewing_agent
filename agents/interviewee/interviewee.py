@@ -10,7 +10,7 @@ from parlai.core.metrics import AverageMetric
 from parlai_internal.agents.torch_span_agent.torch_span_agent import TorchSpanAgent, DialogueHistory
 from parlai_internal.utilities.flow_lstm_util.models.seq2seq import TeacherModel
 from parlai_internal.utilities.flow_lstm_util import constants
-from parlai_internal.utilities.flow_lstm_util.models import unpack_batch
+from parlai_internal.utilities.flow_lstm_util.models.trainer import unpack_batch
 from parlai_internal.utilities.flow_lstm_util.dictionary_agent import InterviewDictionaryAgent
 
 
