@@ -3,7 +3,6 @@ Torch Classifier Agents extract answer text from the context by prediction the s
 """
 
 from abc import ABC
-from typing import Optional
 from parlai.core.params import ParlaiParser
 from parlai.core.opt import Opt
 from parlai.core.torch_agent import TorchAgent, Output, Optional, History, Batch

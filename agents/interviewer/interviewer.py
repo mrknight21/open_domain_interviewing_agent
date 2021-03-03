@@ -98,7 +98,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         return torch.nn.NLLLoss(ignore_index=constants.PAD_ID)
 
     def load_question_generation_model(self):
-        filename = self.opt['init_model_file']
+        filename = self.opt['init_model']
         if not filename:
             filename = os.path.join(self.opt['datapath'], constants.FINE_TUNE_FILE)
         print(f"Loading model from '{filename}'...")

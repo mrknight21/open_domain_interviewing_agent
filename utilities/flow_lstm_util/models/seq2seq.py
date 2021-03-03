@@ -14,8 +14,8 @@ import stanza.models.common.seq2seq_constant as constant
 from stanza.models.common import utils as seq2sequtils
 from stanza.models.common.beam import Beam
 
-from parlai_internal.utilities.flow_lstm_util.models import LSTMAttention
-from parlai_internal.agents.interviewee.constants import *
+from parlai_internal.utilities.flow_lstm_util.models.lstm_attention import LSTMAttention
+from parlai_internal.utilities.flow_lstm_util.constants import *
 from parlai_internal.utilities import squad_eval
 
 f1_cache = dict()

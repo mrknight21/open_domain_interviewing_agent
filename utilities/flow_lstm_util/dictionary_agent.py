@@ -8,9 +8,6 @@ from parlai.core.opt import Opt
 from parlai_internal.utilities.flow_lstm_util import constants
 
 
-
-
-
 class InterviewDictionaryAgent(DictionaryAgent):
 
     def __init__(self, opt: Opt, shared=None):
@@ -48,6 +45,7 @@ class InterviewDictionaryAgent(DictionaryAgent):
         self.id2char = vocab['id2char']
         self.wordid2chars = vocab['wordid2chars']
         self.wordid2docfreq = vocab['wordid2docfreq']
+        self.vocab = vocab
         logging.info(f'num words = {len(self)}')
 
     def is_prebuilt(self):

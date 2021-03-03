@@ -7,7 +7,7 @@ import torch
 
 import stanza.models.common.seq2seq_constant as constant
 from parlai_internal.utilities.flow_lstm_util.models.seq2seq import Seq2SeqModel, TeacherModel
-from parlai_internal.utilities.flow_lstm_util.models import pad_char_start_end
+from parlai_internal.utilities.flow_lstm_util.util import pad_char_start_end
 from stanza.models.common import utils
 
 def unpack_batch(batch, use_cuda):
