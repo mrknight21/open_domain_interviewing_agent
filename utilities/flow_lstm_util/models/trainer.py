@@ -2,17 +2,12 @@
 This file contains the main trainer class that's in charge of training and prediction, as well as helper functions.
 """
 
-import random
 import sys
-import numpy as np
-from collections import Counter
 import torch
-from torch import nn
-import torch.nn.init as init
 
 import stanza.models.common.seq2seq_constant as constant
-from parlai_internal.agents.interviewee.models.seq2seq import Seq2SeqModel, TeacherModel
-from parlai_internal.agents.interviewee.models.data import pad_char_start_end
+from parlai_internal.utilities.flow_lstm_util.models.seq2seq import Seq2SeqModel, TeacherModel
+from parlai_internal.utilities.flow_lstm_util.models import pad_char_start_end
 from stanza.models.common import utils
 
 def unpack_batch(batch, use_cuda):

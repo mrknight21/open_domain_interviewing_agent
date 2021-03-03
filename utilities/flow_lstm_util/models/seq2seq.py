@@ -4,7 +4,6 @@ This file contains the description of the question generation and teacher QA/cla
 
 from collections import Counter
 import numpy as np
-import random
 import torch
 from torch import nn
 from torch.distributions.categorical import Categorical
@@ -15,7 +14,7 @@ import stanza.models.common.seq2seq_constant as constant
 from stanza.models.common import utils as seq2sequtils
 from stanza.models.common.beam import Beam
 
-from parlai_internal.agents.interviewee.models.lstm_attention import LSTMAttention
+from parlai_internal.utilities.flow_lstm_util.models import LSTMAttention
 from parlai_internal.agents.interviewee.constants import *
 from parlai_internal.utilities import squad_eval
 
