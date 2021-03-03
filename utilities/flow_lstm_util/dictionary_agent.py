@@ -11,7 +11,7 @@ from parlai_internal.utilities.flow_lstm_util import constants
 
 
 
-class IntervieweeDictionaryAgent(DictionaryAgent):
+class InterviewDictionaryAgent(DictionaryAgent):
 
     def __init__(self, opt: Opt, shared=None):
         """

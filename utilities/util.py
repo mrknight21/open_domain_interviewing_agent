@@ -115,3 +115,4 @@ def get_correct_alignement(context, gold_text, start_idx):
 
 def to_list(tensor):
     return tensor.detach().cpu().tolist()
+
