@@ -63,6 +63,7 @@ class DialogueHistory(History):
         dialogue is a tuple with index 0 from the others and the index 1 from self
         :param text: the current observed utterance text
         """
+
         if self.size > 0:
             while len(self.history_dialogues) >= self.size/2:
                 self.history_dialogues.pop(0)
