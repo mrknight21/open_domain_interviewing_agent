@@ -2,7 +2,7 @@ import os
 import torch
 from parlai.core.message import Message
 from parlai.core.torch_agent import Optional, Batch, Output
-from parlai.core.torch_generator_agent import TorchGeneratorAgent, PPLMetric
+from parlai.core.torch_generator_agent import TorchGeneratorAgent, PPLMetric, TorchGeneratorModel
 from parlai_internal.utilities.flow_lstm_util.dictionary_agent import InterviewDictionaryAgent
 from parlai.core.metrics import AverageMetric
 from parlai_internal.agents.interviewee.interviewee import IntervieweeHistory
@@ -11,6 +11,115 @@ from parlai_internal.utilities.flow_lstm_util.models import trainer
 from parlai_internal.utilities.flow_lstm_util import constants
 from parlai_internal.utilities.flow_lstm_util import util
 
+
+
+class Sq2SqQuestionGenerationModel(TorchGeneratorModel):
+
+    def __init__(self, opt, dict):
+        # self.add_start_token = opt["add_start_token"]
+        super().__init__(*self._get_special_tokens(opt, dict))
+
+        # init the model
+        self.sq2sq_model = self.load_question_generation_model(opt, dict)
+        self.config = self.sq2sq_model.args
+
+    def encoder(self, src, src_mask, bg, bg_mask, turn_ids=None, last_state_only=True):
+        # prepare for encoder/
+        h_in, src_mask, (hn, cn), h_bg = self.sq2sq_model.encode_sources(src, src_mask, bg, bg_mask, turn_ids=turn_ids)
+        if last_state_only:
+            return {'h_in': h_in[-1:, :, :], 'src_mask': src_mask[-1:, :], 'hn': hn[:, -1:, :], 'cn': cn[:, -1:, :],
+                    'h_bg': h_bg[-1:, :], 'turn_ids': turn_ids[:, -1:, :]}
+        else:
+            return {'h_in': h_in, 'src_mask': src_mask, 'hn': hn, 'cn': cn,
+                    'h_bg': h_bg, 'turn_ids': turn_ids}
+
+    def decoder(self, decoder_input, encoder_states, incr_state):
+        hids = []
+        decoder_input = self.sq2sq_model.emb_drop(self.sq2sq_model.embedding(decoder_input))
+        h_in, src_mask, hn, cn, h_bg, turn_ids = encoder_states['h_in'], encoder_states['src_mask'], \
+                                                 encoder_states['hn'], encoder_states['cn'], encoder_states['h_bg'],\
+                                                 encoder_states['turn_ids']
+        if incr_state:
+            dec_hidden, hids = incr_state['dec_hidden'], incr_state['hids']
+            hn, cn = dec_hidden
+        log_probs, dec_hidden, attn, h_out = self.sq2sq_model.decode(decoder_input, hn, cn, h_in, src_mask,
+                turn_ids=turn_ids, previous_output=None if len(hids) == 0 else hids, h_bg=h_bg)
+        hids.append(h_out.squeeze(1))
+        incr_state = {'dec_hidden': dec_hidden, 'hids': hids}
+        return log_probs, incr_state
+
+    def load_question_generation_model(self, opt, dict):
+        filename = opt['init_model']
+        if not filename:
+            filename = os.path.join(opt['datapath'], constants.FINE_TUNE_FILE)
+        print(f"Loading model from '{filename}'...")
+        checkpoint = torch.load(filename, lambda storage, loc: storage)
+        args = checkpoint['config']
+        if dict.vocab is not None:
+            args['vocab'] = dict.vocab
+        model = Seq2SeqModel(args, use_cuda=not opt['no_cuda'])
+        model.load_state_dict(checkpoint['model'])
+        return model
+
+    def _get_special_tokens(self, opt, dict):
+        return dict.null_idx, dict.start_idx, dict.end_idx
+
+    def reorder_encoder_states(self, encoder_states, indices):
+        encs = {}
+        for name, states in encoder_states.items():
+            if name == 'turn_ids':
+                encs[name] = states
+            elif isinstance(states, torch.Tensor):
+                encs[name] = torch.index_select(states, 0, indices)
+            else:
+                encs[name] = (torch.index_select(states[0], 0, indices), torch.index_select(states[1], 0, indices))
+        return encs
+
+    def output(self, tensor):
+        """
+        Compute output logits.
+        """
+        return tensor
+
+    def reorder_decoder_incremental_state(self, incremental_state, inds):
+        new_incr_state = {}
+        for name, states in incremental_state.items():
+            if name == 'dec_hidden':
+                new_incr_state[name] = (torch.index_select(states[0], 0, inds), torch.index_select(states[1], 0, inds))
+            if name == 'hids':
+                new_incr_state[name] = [torch.index_select(hid, 0, inds) for hid in states]
+        return new_incr_state
+
+    def decode_forced(self, encoder_states, ys):
+        """
+        Override to get rid of start token input.
+        """
+        if self.add_start_token:
+            return super().decode_forced(encoder_states, ys)
+        seqlen = ys.size(1)
+        inputs = ys.narrow(1, 0, seqlen - 1)
+        latent, _ = self.decoder(inputs, encoder_states)
+        logits = self.output(latent)
+        _, preds = logits.max(dim=2)
+        return logits, preds
+
+    def forward(self, xs, ys=None, prev_enc=None, maxlen=None, bsz=None):
+        src = xs['src']
+        src_mask = xs['src_mask']
+        turn_ids = xs ['turn_ids']
+        tgt_in = xs['tgt_in']
+        bg = xs.get('bg', None)
+        bg_mask = xs.get('bg_mask', None)
+        # prepare for encoder/decoder
+        B, T, L = tgt_in.size()
+        tgt_in = tgt_in.view(B*T, L)
+        dec_inputs = self.sq2sq_model.emb_drop(self.sq2sq_model.embedding(tgt_in))
+
+        h_in, src_mask, (hn, cn), h_bg = self.sq2sq_model.encode_sources(src, src_mask, bg, bg_mask, turn_ids=turn_ids)
+
+        log_probs, _, dec_attn, _ = self.sq2sq_model.decode(dec_inputs, hn, cn, h_in, src_mask, turn_ids=turn_ids, h_bg=self.sq2sq_model.drop(h_bg))
+        _, preds = log_probs.max(dim=2)
+        return log_probs[-1:, :, :], preds, {'h_in':h_in, 'src_mask': src_mask, 'hn': hn, 'cn': cn, 'h_bg': h_bg}
 
 
 class InterviewerHistory(IntervieweeHistory):
@@ -62,7 +171,6 @@ class InterviewerHistory(IntervieweeHistory):
         self.temp_history = temp_history
 
 
-
 class InterviewerAgent(TorchGeneratorAgent):
     """
     Interviewer agent.
@@ -109,8 +217,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         """
         Construct the model.
         """
-        model = self.load_question_generation_model()
-        return model
+        return Sq2SqQuestionGenerationModel(self.opt, self.dict)
 
     def build_criterion(self):
         """
@@ -122,23 +229,11 @@ class InterviewerAgent(TorchGeneratorAgent):
         """
         return torch.nn.NLLLoss(ignore_index=constants.PAD_ID, reduction='none')
 
-    def load_question_generation_model(self):
-        filename = self.opt['init_model']
-        if not filename:
-            filename = os.path.join(self.opt['datapath'], constants.FINE_TUNE_FILE)
-        print(f"Loading model from '{filename}'...")
-        checkpoint = torch.load(filename, lambda storage, loc: storage)
-        args = checkpoint['config']
-        if self.dict.vocab is not None:
-            args['vocab'] = self.dict.vocab
-        model = Seq2SeqModel(args, use_cuda=self.use_cuda)
-        model.load_state_dict(checkpoint['model'])
-        return model
 
     def _set_text_vec(self, obs, history, truncate, is_training=True):
         tokenized_data = self.tokenize_from_history(obs)
         vectorized_data = util.map_data(tokenized_data, self.dict)
-        features = util.generate_features(tokenized_data, vectorized_data, self.model.args['max_turns'])
+        features = util.generate_features(tokenized_data, vectorized_data, self.model.config['max_turns'])
         obs['text_vec'] = features
         labels_with_special_tokens = []
         for l in obs.get('labels', obs.get('eval_labels', [])):
@@ -184,44 +279,76 @@ class InterviewerAgent(TorchGeneratorAgent):
         valid_inds, exs = zip(*valid_obs)
         src_text_numb = [len(obs['text_vec']['src_text']) for obs in obs_batch]
         retval = self._collate_fn(obs_batch)
+
+        inputs = trainer.unpack_batch(retval, self.use_cuda)
+        src, tgt_in, tgt_out, turn_ids = \
+            inputs['src'], inputs['tgt_in'], inputs['tgt_out'], inputs['turn_ids']
+        bg = inputs.get('bg', None)
+        src_mask = src.eq(constants.PAD_ID)
+        bg_mask = bg.eq(constants.PAD_ID) if bg is not None else None
         batch = Batch(
             batchsize=len(valid_obs),
             valid_indices=valid_inds,
             no_answer_reply=obs_batch[0].get('no_answer_reply', 'CANNOTANSWER'),
-            src=retval['src'],
-            src_char=retval['src_char'],
-            src_text=retval['src_text'],
-            bg=retval['bg'],
-            bg_char=retval['bg_char'],
-            bg_text=retval['bg_text'],
-            tgt_in=retval['tgt_in'],
-            tgt_out=retval['tgt_out'],
-            tgt_out_char=retval['tgt_out_char'],
-            tgt_text=retval['tgt_text'],
-            turn_ids=retval['turn_ids'],
-            ctx=retval['ctx'],
-            ctx_char=retval['ctx_char'],
-            ctx_text=retval['ctx_text'],
+            src=src,
+            src_char=inputs.get('src_char', None),
+            src_text=inputs.get('src_text', None),
+            bg=bg,
+            bg_char=inputs.get('bg_char', None),
+            bg_text=inputs.get('bg_text', None),
+            tgt_in=tgt_in,
+            tgt_out=tgt_out,
+            tgt_out_char=inputs.get('tgt_out_char', None),
+            tgt_text=inputs.get('tgt_text', None),
+            turn_ids=turn_ids,
+            ctx=inputs.get('ctx', None),
+            ctx_char=inputs.get('ctx_char', None),
+            ctx_text=inputs.get('ctx_text', None),
             this_turn=retval['this_turn'],
-            label_vec=retval['tgt_out'],
-            labels=retval['tgt_text'],
+            label_vec=tgt_out[:, -1:, :],
+            text_vec=src,
+            labels=inputs.get('tgt_text', None),
+            text_lengths=src_text_numb,
+            observations=obs_batch
         )
         return batch
 
     def compute_loss(self, batch, return_output=False):
-        input = self._model_input(batch)
-        loss, reward, reward_items, stats, preds = self.model(input)
-        outputs = {'reward': reward, 'reward_items': reward_items, 'stats': stats, 'pred': preds}
-        batches_count = [1] * batch.batchsize
-        self.record_local_metric('loss',
-                                 AverageMetric.many([loss.data.cpu()] * batch.batchsize, batches_count))
+        """
+        Compute and return the loss for the given batch.
+
+        Easily overridable for customized loss functions.
+
+        If return_output is True, the full output from the call to self.model()
+        is also returned, via a (loss, model_output) pair.
+        """
+        if batch.label_vec is None:
+            raise ValueError('Cannot compute loss without a label.')
+        model_output = self.model(self._model_input(batch), ys=batch.label_vec)
+        scores, preds, *_ = model_output
+        score_view = scores.view(-1, scores.size(-1))
+        loss = self.criterion(score_view, batch.label_vec.view(-1))
+        loss = loss.view(scores.shape[:-1]).sum(dim=1)
+        # save loss to metrics
+        labels = batch.label_vec.view(batch.batchsize, -1)
+        notnull = labels.ne(self.NULL_IDX)
+        target_tokens = notnull.long().sum(dim=-1)
+        correct = ((labels == preds[-1, :]) * notnull).sum(dim=-1)
+
+        self.record_local_metric('loss', AverageMetric.many(loss, target_tokens))
+        self.record_local_metric('ppl', PPLMetric.many(loss, target_tokens))
+        self.record_local_metric(
+            'token_acc', AverageMetric.many(correct, target_tokens)
+        )
+        # actually do backwards loss
+        loss = loss.sum()
+        loss /= target_tokens.sum()  # average loss per token
         if return_output:
-            return loss, outputs
+            return (loss, model_output)
         else:
             return loss
 
-
-    def eval_step(self, batch):
+    def eval_step(self, batch, return_output=False):
         if batch.batchsize <= 0:
             return
         else:
@@ -230,7 +357,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         input = self._model_input(batch)
         # only the output of the last turn
         tgt_out = input['tgt_out'][:, -1:, :]
-        log_probs = self.model(**input)[-1:, :, :]
+        log_probs = self.model.sq2sq_model(**input)[-1:, :, :]
         loss = self.criterion(log_probs.view(-1, self.dict.vocab_size), tgt_out.view(-1))
         pred_seqs, _ = self.predict(batch)
         texts = [" ".join(seq) for seq in pred_seqs]
@@ -247,7 +374,8 @@ class InterviewerAgent(TorchGeneratorAgent):
         # self.record_local_metric(
         #     'token_acc', AverageMetric.many(correct, target_tokens)
         # )
-        return Output(text)
+        return Output(texts)
+
 
     def tokenize_from_history(self, item):
         strings_to_tokenize = [self.history.title, self.history.section_title, self.history.context, self.history.background]
@@ -304,16 +432,16 @@ class InterviewerAgent(TorchGeneratorAgent):
             retval['bg_text'] = [x['bg_text'] for x in batch_data]
         return retval
 
+    def _encoder_input(self, batch):
+        src_mask = batch['src'].eq(constants.PAD_ID)
+        bg_mask = batch['bg'].eq(constants.PAD_ID) if batch['bg'] is not None else None
+        return [batch['src'], src_mask, batch['bg'], bg_mask, batch['turn_ids']]
+
     def _model_input(self, batch):
-        inputs = trainer.unpack_batch(batch, self.use_cuda)
-        src, tgt_in, tgt_out, turn_ids = \
-            inputs['src'], inputs['tgt_in'], inputs['tgt_out'], inputs['turn_ids']
-        bg = inputs.get('bg', None)
-        src_mask = src.eq(constants.PAD_ID)
-        bg_mask = bg.eq(constants.PAD_ID) if bg is not None else None
-        batch_size = batch.batchsize
-        return {'src': src, 'src_mask': src_mask, 'turn_ids': turn_ids, 'tgt_in': tgt_in,
-                'bg': bg, 'bg_mask': bg_mask, 'tgt_out': tgt_out}
+        src_mask = batch['src'].eq(constants.PAD_ID)
+        bg_mask = batch['bg'].eq(constants.PAD_ID) if batch['bg'] is not None else None
+        return {'src': batch['src'], 'src_mask': src_mask, 'turn_ids': batch['turn_ids'],
+                'tgt_in': batch['tgt_in'], 'bg': batch['bg'], 'bg_mask': bg_mask, 'tgt_out': batch['tgt_out']}
 
     def predict(self, batch, beam_size=1, return_pair_level=False, return_preds=False, return_rewards=False):
         inputs = trainer.unpack_batch(batch, self.use_cuda)
@@ -326,7 +454,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         if not return_preds:
             self.model.eval()
         batch_size = src.size(0)
-        preds = self.model.predict(src, src_mask, turn_ids, beam_size=beam_size, bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level)
+        preds = self.model.sq2sq_model.predict(src, src_mask, turn_ids, beam_size=beam_size, bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level)
         pred_seqs = [[self.dict.ind2tok[id_] for id_ in ids] for ids in preds] # unmap to tokens
         pred_seqs = util.prune_decoded_seqs(pred_seqs)
         return pred_seqs, preds
@@ -342,7 +470,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         if not return_preds:
             self.model.eval()
         batch_size = src.size(0)
-        preds = self.model.sample(src, src_mask, turn_ids, top_p=top_p, bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level)
+        preds = self.model.sq2sq_model.sample(src, src_mask, turn_ids, top_p=top_p, bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level)
         preds, nll = preds
         pred_seqs = [[self.vocab['id2word'][id_] for id_ in ids] for ids in preds] # unmap to tokens
         pred_seqs = util.prune_decoded_seqs(pred_seqs)

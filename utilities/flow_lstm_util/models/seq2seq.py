@@ -237,15 +237,17 @@ class Seq2SeqModel(nn.Module):
         """ Decode a step, based on context encoding and source context states."""
         decoder = self.decoder if decoder is None else decoder
         dec_hidden = (hn, cn)
-        h_out, dec_hidden, attn = decoder(dec_inputs, dec_hidden, ctx, ctx_mask, turn_ids=turn_ids, pair_level_output=pair_level_output, previous_output=previous_output, h_bg=h_bg)
-
+        try:
+            h_out, dec_hidden, attn = decoder(dec_inputs, dec_hidden, ctx, ctx_mask, turn_ids=turn_ids, pair_level_output=pair_level_output, previous_output=previous_output, h_bg=h_bg)
+        except RuntimeError as e:
+            pass
         h_out_reshape = h_out.contiguous().view(h_out.size(0) * h_out.size(1), -1)
         decoder_logits = self.dec2vocab(self.drop(h_out_reshape))
         decoder_logits = decoder_logits.view(h_out.size(0), h_out.size(1), -1)
         log_probs = self.get_log_prob(decoder_logits)
         return log_probs, dec_hidden, attn, h_out
 
-    def encode_sources(self, src, src_mask, bg, bg_mask, encoder=None, bg_encoder=None, h_enc2dec=None, c_enc2dec=None, embedding=None, turn_ids=None):
+    def encode_sources(self, src, src_mask, bg, bg_mask, turn_ids=None, encoder=None, bg_encoder=None, h_enc2dec=None, c_enc2dec=None, embedding=None):
         encoder = self.encoder if encoder is None else encoder
         bg_encoder = self.bg_encoder if bg_encoder is None and hasattr(self, 'bg_encoder') else bg_encoder
         embedding = self.embedding if embedding is None else embedding
@@ -311,7 +313,7 @@ class Seq2SeqModel(nn.Module):
 
         return h_in, src_mask, (hn, cn), h_bg
 
-    def forward(self, src, src_mask, turn_ids, tgt_in, bg=None, bg_mask=None, neg_in=None, neg_out=None, tgt_out=None, reward_only=False, ctx=None):
+    def forward(self, src, src_mask, turn_ids, tgt_in, bg=None, bg_mask=None, neg_in=None, neg_out=None, tgt_out=None, reward_only=False, ctx=None, ys=None):
         # prepare for encoder/decoder
         B, T, L = tgt_in.size()
         tgt_in = tgt_in.view(B*T, L)
