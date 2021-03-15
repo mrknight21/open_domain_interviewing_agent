@@ -10,8 +10,84 @@ from parlai_internal.utilities.flow_lstm_util.models.seq2seq import Seq2SeqModel
 from parlai_internal.utilities.flow_lstm_util.models import trainer
 from parlai_internal.utilities.flow_lstm_util import constants
 from parlai_internal.utilities.flow_lstm_util import util
+from parlai.utils.misc import AttrDict
 
 
+
+class DialogueTurn(AttrDict):
+
+    def __init__(self, question_text, answer_text=None, log_prob= None, reward= None, **kwargs,):
+        super().__init__(
+            question=question_text,
+            answer=answer_text,
+            log_prob=log_prob,
+            reward=reward
+            **kwargs,
+        )
+        self.complete = False
+        self.generated = False
+        self.question  =question_text
+        self.answer = answer_text
+        self.log_prob = log_prob
+        if log_prob:
+            self.generated = True
+        if self.question and self.answer:
+            self.complete = True
+        self.items = (self.question, self.answer)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self.items[key]
+        else:
+            super().__getitem__(key)
+
+class InterviewerHistory(IntervieweeHistory):
+
+    def _update_cache(self, obs):
+        cache = {
+            'character_start_end': obs['character_start_end'],
+            'yesno': obs['yesno'], 'followup': obs['followup']}
+        self.history_cache.append(cache)
+
+    def update_history(self, obs: Message, temp_history: Optional[str] = None):
+        """
+        Update the history with the given observation.
+
+        :param obs:
+            Observation used to update the history.
+        :param temp_history:
+            Optional temporary string. If it is not None, this string will be
+            appended to the end of the history. It will not be in the history
+            on the next dialogue turn. Set to None to stop adding to the
+            history.
+        """
+        if "text" in obs and obs["text"] is not None:
+            if not self.context and obs.get('context', None):
+                    self.context = obs['context']
+            if not self.background and obs.get('background', None):
+                    self.background = obs['background']
+            if not self.title and obs.get('title', None):
+                    self.title = obs['title']
+            if not self.section_title and obs.get('section_title', None):
+                    self.section_title = obs['section_title']
+            text = obs['text']
+            if text:
+                if "|" in text:
+                    texts = text.split('|')
+                    text = max(texts, key=len)
+                self._update_raw_strings(text)
+                if self.add_person_tokens:
+                    text = self._add_person_tokens(
+                        obs[self.field], self.p1_token, self.add_p1_after_newln
+                    )
+                # update history string
+                self._update_strings(text)
+                # update history dialogues
+                self._update_dialogues(text)
+                # update history vecs
+                self._update_vecs(text)
+                self._update_cache(obs)
+        self.temp_history = temp_history
 
 class Sq2SqQuestionGenerationModel(TorchGeneratorModel):
 
@@ -121,54 +197,6 @@ class Sq2SqQuestionGenerationModel(TorchGeneratorModel):
         _, preds = log_probs.max(dim=2)
         return log_probs[-1:, :, :], preds, {'h_in':h_in, 'src_mask': src_mask, 'hn': hn, 'cn': cn, 'h_bg': h_bg}
 
-
-class InterviewerHistory(IntervieweeHistory):
-
-    def _update_cache(self, obs):
-        cache = {
-            'character_start_end': obs['character_start_end'],
-            'yesno': obs['yesno'], 'followup': obs['followup']}
-        self.history_cache.append(cache)
-
-    def update_history(self, obs: Message, temp_history: Optional[str] = None):
-        """
-        Update the history with the given observation.
-
-        :param obs:
-            Observation used to update the history.
-        :param temp_history:
-            Optional temporary string. If it is not None, this string will be
-            appended to the end of the history. It will not be in the history
-            on the next dialogue turn. Set to None to stop adding to the
-            history.
-        """
-        if "text" in obs and obs["text"] is not None:
-            if not self.context and obs.get('context', None):
-                    self.context = obs['context']
-            if not self.background and obs.get('background', None):
-                    self.background = obs['background']
-            if not self.title and obs.get('title', None):
-                    self.title = obs['title']
-            if not self.section_title and obs.get('section_title', None):
-                    self.section_title = obs['section_title']
-            text = obs['text']
-            if text:
-                if "|" in text:
-                    texts = text.split('|')
-                    text = max(texts, key=len)
-                self._update_raw_strings(text)
-                if self.add_person_tokens:
-                    text = self._add_person_tokens(
-                        obs[self.field], self.p1_token, self.add_p1_after_newln
-                    )
-                # update history string
-                self._update_strings(text)
-                # update history dialogues
-                self._update_dialogues(text)
-                # update history vecs
-                self._update_vecs(text)
-                self._update_cache(obs)
-        self.temp_history = temp_history
 
 
 class InterviewerAgent(TorchGeneratorAgent):
@@ -313,6 +341,46 @@ class InterviewerAgent(TorchGeneratorAgent):
         )
         return batch
 
+    def _init_cuda_buffer(self, batchsize, maxlen, force=False):
+        return
+
+    # def _dummy_batch(self, batchsize, maxlen):
+    #     text_vec = (
+    #         torch.arange(1, maxlen + 1)  # need it as long as specified
+    #         .clamp(max=3)  # cap at 3 for testing with tiny dictionaries
+    #         .unsqueeze(0)
+    #         .expand(batchsize, 1, maxlen)
+    #         .cuda()
+    #     )
+    #     # label vec has two tokens to make it interesting, but we we can't use the
+    #     # start token, it's reserved.
+    #     label_vec = (
+    #         torch.LongTensor([self.end_idx, self.null_idx])
+    #         .unsqueeze(0)
+    #         .expand(batchsize, 2)
+    #         .cuda()
+    #     )
+    #     batch = Batch(
+    #         batchsize=batchsize,
+    #         valid_indices=range(batchsize),
+    #         src=text_vec,
+    #         src_char=text_vec,
+    #         bg=text_vec,
+    #         bg_char=text_vec,
+    #         tgt_in=text_vec,
+    #         tgt_out=text_vec,
+    #         tgt_out_char=text_vec,
+    #         turn_ids=torch.Tensor([0]).cuda(),
+    #         # this_turn=retval['this_turn'],
+    #         # label_vec=tgt_out[:, -1:, :],
+    #         text_vec=text_vec,
+    #         # labels=inputs.get('tgt_text', None),
+    #         text_lengths=torch.Tensor([maxlen]*batchsize).cuda(),
+    #         # observations=obs_batch
+    #     )
+    #     return batch
+
+
     def compute_loss(self, batch, return_output=False):
         """
         Compute and return the loss for the given batch.
@@ -324,6 +392,8 @@ class InterviewerAgent(TorchGeneratorAgent):
         """
         if batch.label_vec is None:
             raise ValueError('Cannot compute loss without a label.')
+        if batch.label_lengths is None:
+            return torch.randn(len(batch.text_lengths))
         model_output = self.model(self._model_input(batch), ys=batch.label_vec)
         scores, preds, *_ = model_output
         score_view = scores.view(-1, scores.size(-1))
