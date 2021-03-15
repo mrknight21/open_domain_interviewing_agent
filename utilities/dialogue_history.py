@@ -1,6 +1,7 @@
 from parlai.core.message import Message
 from parlai.utils.misc import AttrDict
 from parlai.core.torch_agent import History, Optional
+from collections import  deque
 
 
 class DialogueTurn(AttrDict):
@@ -132,8 +133,23 @@ class DialogueHistory(History):
 
 class MultiDialogueHistory(DialogueHistory):
 
+    def __init__(self, opt, history_class, field='text', **kwargs):
+        self.sep_last_utt = opt.get('sep_last_utt', False)
+        self.history_cls_func = history_class
+        self.lineages = []
+
+    def reset(self):
+        """
+        Clear the history.
+        """
+        self.lineages = []
+
     def update_history(self, obs: Message, temp_history: Optional[str] = None):
-        pass
+        for i, history in self.lineages:
+            if temp_history:
+                one_temp_history = temp_history[0]
+            text = Message[self.field][i]
+            history.update(text, one_temp_history)
 
     def get_history_str(self):
         return None
@@ -149,3 +165,9 @@ class MultiDialogueHistory(DialogueHistory):
         Return a list of history vecs.
         """
         return None
+
+    def add_reply(self, text):
+        """
+        Add your own response to the history.
+        """
+        pass
