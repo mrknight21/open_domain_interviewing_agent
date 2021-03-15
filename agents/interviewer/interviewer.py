@@ -6,40 +6,15 @@ from parlai.core.torch_generator_agent import TorchGeneratorAgent, PPLMetric, To
 from parlai_internal.utilities.flow_lstm_util.dictionary_agent import InterviewDictionaryAgent
 from parlai.core.metrics import AverageMetric
 from parlai_internal.agents.interviewee.interviewee import IntervieweeHistory
+from parlai_internal.agents.torch_span_agent.torch_span_agent import DialogueHistory
 from parlai_internal.utilities.flow_lstm_util.models.seq2seq import Seq2SeqModel
 from parlai_internal.utilities.flow_lstm_util.models import trainer
 from parlai_internal.utilities.flow_lstm_util import constants
 from parlai_internal.utilities.flow_lstm_util import util
-from parlai.utils.misc import AttrDict
+from parlai.core.params import ParlaiParser
+from parlai.core.opt import Opt
 
 
-
-class DialogueTurn(AttrDict):
-
-    def __init__(self, question_text, answer_text=None, log_prob= None, reward= None, **kwargs,):
-        super().__init__(
-            question=question_text,
-            answer=answer_text,
-            log_prob=log_prob,
-            reward=reward
-            **kwargs,
-        )
-        self.complete = False
-        self.generated = False
-        self.question  =question_text
-        self.answer = answer_text
-        self.log_prob = log_prob
-        if log_prob:
-            self.generated = True
-        if self.question and self.answer:
-            self.complete = True
-        self.items = (self.question, self.answer)
-
-    def __getitem__(self, key):
-        if isinstance(key, int):
-            return self.items[key]
-        else:
-            super().__getitem__(key)
 
 class InterviewerHistory(IntervieweeHistory):
 
@@ -204,6 +179,42 @@ class InterviewerAgent(TorchGeneratorAgent):
     Interviewer agent.
     """
 
+    @classmethod
+    def add_cmdline_args(cls, parser, partial_opt: Optional[Opt] = None) -> ParlaiParser:
+        """
+        Add CLI args.
+        """
+        TorchGeneratorAgent.add_cmdline_args(parser)
+        parser = parser.add_argument_group('Torch Span Classifier Arguments')
+        # interactive mode
+        parser.add_argument(
+            '--print-scores',
+            type='bool',
+            default=False,
+            help='print probability of chosen class during ' 'interactive mode',
+        )
+        # miscellaneous arguments
+        parser.add_argument(
+            '--reinforcement-learning',
+            type='bool',
+            default=False,
+            help='train with reinforcement learning',
+        )
+        # query maximum length
+        parser.add_argument(
+            '--exploration-steps',
+            type=int,
+            default=0,
+            help='maximum number of deviation turns allowed for history',
+        )
+
+    def __init__(self, opt: Opt, shared=None):
+        super().__init__(opt, shared)
+
+        # set up model and optimizers
+        self.rl_mode = opt['reinforcement_learning']
+        self.exploration_steps = opt['exploration_steps']
+
     @staticmethod
     def dictionary_class():
         """
@@ -240,6 +251,45 @@ class InterviewerAgent(TorchGeneratorAgent):
         Can be overriden if a more complex history is required.
         """
         return InterviewerHistory
+
+    def train_step(self, batch):
+        """
+        Train on a single batch of examples.
+        """
+        # helps with memory usage
+        # note we want to use the opt's batchsize instead of the observed batch size
+        # in case dynamic batching is in use
+        self._init_cuda_buffer(self.opt['batchsize'], self.label_truncate or 256)
+        self.model.train()
+        self.zero_grad()
+
+        try:
+            loss = self.compute_loss(batch)
+            self.backward(loss)
+            self.update_params()
+            oom_sync = False
+        except RuntimeError as e:
+            # catch out of memory exceptions during fwd/bck (skip batch)
+            if 'out of memory' in str(e):
+                oom_sync = True
+                logging.error(
+                    'Ran out of memory, skipping batch. '
+                    'if this happens frequently, decrease batchsize or '
+                    'truncate the inputs to the model.'
+                )
+                self.global_metrics.add('skipped_batches', SumMetric(1))
+            else:
+                raise e
+
+        if oom_sync:
+            # moved outside of the try-except because the raised exception in scope
+            # actually prevents from the data being freed, which can sometimes cause
+            # us to OOM during our OOM handling.
+            # https://github.com/pytorch/pytorch/issues/18853#issuecomment-583779161
+
+            # gradients are synced on backward, now this model is going to be
+            # out of sync! catch up with the other workers
+            self._init_cuda_buffer(8, 8, True)
 
     def build_model(self):
         """
@@ -392,8 +442,8 @@ class InterviewerAgent(TorchGeneratorAgent):
         """
         if batch.label_vec is None:
             raise ValueError('Cannot compute loss without a label.')
-        if batch.label_lengths is None:
-            return torch.randn(len(batch.text_lengths))
+        # if batch.label_lengths is None:
+        #     return torch.randn(len(batch.text_lengths))
         model_output = self.model(self._model_input(batch), ys=batch.label_vec)
         scores, preds, *_ = model_output
         score_view = scores.view(-1, scores.size(-1))

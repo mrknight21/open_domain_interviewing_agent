@@ -13,6 +13,7 @@ from parlai_internal.utilities.flow_lstm_util import util
 from parlai_internal.utilities.flow_lstm_util.dictionary_agent import InterviewDictionaryAgent
 
 
+
 class IntervieweeHistory(DialogueHistory):
 
     def __init__(self, opt, **kwargs):
@@ -109,7 +110,7 @@ class IntervieweeAgent(TorchSpanAgent):
             teacher_checkpoint = torch.load(teacher_path, lambda storage, loc: storage)
             config = model_checkpoint['config']
             config['teacher_elmo'] = False
-            model = TeacherModel(config, use_cuda=self.use_cuda)
+            model = TeacherModel(config, use_cuda=not self.opt['no_cuda'])
             model.load_state_dict(teacher_checkpoint['model'], strict=False)
         except BaseException:
             import pdb
@@ -145,8 +146,8 @@ class IntervieweeAgent(TorchSpanAgent):
         self.opt['delimiter'] = self.dict.sep_token
         history = self.history_class()(
             self.opt,
-            maxlen=self.text_truncate,
-            size=self.histsz,
+            maxlen=self.opt['text_truncate'],
+            size=self.opt['history_size'],
             p1_token=self.P1_TOKEN,
             p2_token=self.P2_TOKEN,
             dict_agent=self.dict,

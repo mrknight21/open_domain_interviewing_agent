@@ -14,8 +14,8 @@ class InterviewDictionaryAgent(DictionaryAgent):
         """
         Get the pretrained teacher model vocabs
         """
-        if 'dict_file' not in opt or not opt['dict_file']:
-            opt['dict_file'] = os.path.join(opt['datapath'], constants.VOCAB_FILE)
+        # if 'dict_file' not in opt or not opt['dict_file']:
+        opt['dict_file'] = os.path.join(opt['datapath'], constants.VOCAB_FILE)
         self.vocab_size = 0
         self.char_vocab_size = 0
         self.vocab = None

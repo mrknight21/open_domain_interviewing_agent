@@ -11,8 +11,8 @@ from parlai.utils.distributed import is_distributed
 from parlai.utils.torch import PipelineHelper, total_parameters, trainable_parameters, padded_tensor
 from parlai.utils.fp16 import FP16SafeCrossEntropy
 from parlai_internal.utilities import util
+from parlai_internal.utilities.dialogue_history import DialogueHistory
 from parlai.core.metrics import AverageMetric, F1Metric
-from parlai.core.message import Message
 
 
 from transformers import (
@@ -39,98 +39,6 @@ from collections import deque, namedtuple, OrderedDict
 import numpy as np
 import torch
 import torch.nn as nn
-
-
-class DialogueHistory(History):
-    def __init__(self, opt, **kwargs):
-        self.sep_last_utt = opt.get('sep_last_utt', False)
-        super().__init__(opt, **kwargs)
-        self.context = None
-
-    def reset(self):
-        """
-        Clear the history.
-        """
-        self.history_raw_strings = []
-        self.history_dialogues = []
-        self.history_strings = []
-        self.history_vecs = []
-        self.context = None
-
-    def _update_dialogues(self, text):
-        """
-        Update the history dialogue with te given observation.
-        dialogue is a tuple with index 0 from the others and the index 1 from self
-        :param text: the current observed utterance text
-        """
-
-        if self.size > 0:
-            while len(self.history_dialogues) >= self.size/2:
-                self.history_dialogues.pop(0)
-        dialogue = [text, None]
-        if self.history_dialogues and self.history_dialogues[-1][1] is None:
-            self.history_dialogues[-1][1] = text
-        else:
-            self.history_dialogues.append(dialogue)
-
-    def update_history(self, obs: Message, temp_history: Optional[str] = None):
-        """
-        Update the history with the given observation.
-
-        :param obs:
-            Observation used to update the history.
-        :param temp_history:
-            Optional temporary string. If it is not None, this string will be
-            appended to the end of the history. It will not be in the history
-            on the next dialogue turn. Set to None to stop adding to the
-            history.
-        """
-        if "text" in obs and obs["text"] is not None:
-            if not self.context and obs.get('context', None):
-                    self.context = obs['context']
-            text = obs['text']
-            self._update_raw_strings(text)
-            if self.add_person_tokens:
-                text = self._add_person_tokens(
-                    obs[self.field], self.p1_token, self.add_p1_after_newln
-                )
-            # update history string
-            self._update_strings(text)
-            # update history dialogues
-            self._update_dialogues(text)
-            # update history vecs
-            self._update_vecs(text)
-        self.temp_history = temp_history
-
-    def get_history_vec(self):
-        """
-        Override from parent class to possibly add [SEP] token.
-        """
-        if not self.sep_last_utt or len(self.history_vecs) <= 1:
-            return super().get_history_vec()
-
-        history = deque(maxlen=self.max_len)
-        for vec in self.history_vecs[:-1]:
-            history.extend(vec)
-            history.extend(self.delimiter_tok)
-        history.extend([self.dict.end_idx])  # add [SEP] token
-        history.extend(self.history_vecs[-1])
-
-        return history
-
-    def add_reply(self, text):
-        """
-        Add your own response to the history.
-        """
-        self._update_raw_strings(text)
-        if self.add_person_tokens:
-            text = self._add_person_tokens(text, self.p2_token)
-        # update history string
-        self._update_strings(text)
-        # update history vecs
-        self._update_vecs(text)
-        # update history dialogues
-        self._update_dialogues(text)
 
 
 class TorchExtractiveModel(nn.Module, ABC):

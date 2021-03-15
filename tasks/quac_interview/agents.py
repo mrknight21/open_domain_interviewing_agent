@@ -1,10 +1,10 @@
 import os
 import copy
-
+from parlai_internal.agents.interviewee.interviewee import IntervieweeAgent
 from parlai.core.teachers import ParlAIDialogTeacher
 from parlai.utils.misc import warn_once
 from .build import build
-
+import torch
 
 NO_ANSWER_REPLY = "CANNOTANSWER"
 
@@ -64,3 +64,51 @@ class DefaultTeacher(ParlAIDialogTeacher):
         }
         return action
 
+class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
+
+    def __init__(self, opt, shared=None):
+        self.opt = opt
+        self.dict = self.build_dictionary()
+        self.query_truncate = opt['query_maximum_length']
+        self.context_truncate = opt['context_maximum_length']
+        self.history_truncate = opt['history_maximum_length']
+        # now set up any fields that all instances may need
+        self.EMPTY = torch.zeros(0, dtype=torch.long)
+        self.NULL_IDX = self.dict[self.dict.null_token]
+        self.START_IDX = self.dict[self.dict.start_token]
+        self.END_IDX = self.dict[self.dict.end_token]
+        self.model = self.build_model()
+        self.model.eval()
+        self.truncate = self.dict.maxtokens
+        self.history = self.build_history()
+        super().__init__(opt, shared)
+
+
+    def get_model_answer(self, history):
+        pass
+
+    def get_reward(self, history):
+        return 0
+
+    def trim_conversation_lineages(self):
+        pass
+
+    def observe(self, observation):
+        """
+        Process observation for metrics.
+        """
+        self.metrics.clear_recent()
+        if hasattr(self, 'lastY') and self.lastY is not None:
+            self.metrics.evaluate_response(observation, self.lastY)
+            self.custom_evaluation(self.last_act, self.lastY, observation)
+            self.lastY = None
+        recent_metrics = self.metrics.report_recent()
+        if recent_metrics:
+            # for display purposes (display_model), take all accumulated
+            # metrics back into the original observation. This is an abuse of
+            # Messages being pointers
+            if 'metrics' in observation:
+                # override agent-level metrics if present
+                observation.pop('metrics')
+            observation['metrics'] = recent_metrics
+        return observation
