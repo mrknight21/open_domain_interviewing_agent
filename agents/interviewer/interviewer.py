@@ -6,11 +6,10 @@ from parlai.core.torch_generator_agent import TorchGeneratorAgent, PPLMetric, To
 from parlai_internal.utilities.flow_lstm_util.dictionary_agent import InterviewDictionaryAgent
 from parlai.core.metrics import AverageMetric
 from parlai_internal.agents.interviewee.interviewee import IntervieweeHistory
-from parlai_internal.agents.torch_span_agent.torch_span_agent import DialogueHistory
 from parlai_internal.utilities.flow_lstm_util.models.seq2seq import Seq2SeqModel
 from parlai_internal.utilities.flow_lstm_util.models import trainer
-from parlai_internal.utilities.flow_lstm_util import constants
-from parlai_internal.utilities.flow_lstm_util import util
+from parlai_internal.utilities.flow_lstm_util import constants, util
+from parlai_internal.utilities.dialogue_history import MultiDialogueHistory
 from parlai.core.params import ParlaiParser
 from parlai.core.opt import Opt
 
@@ -241,6 +240,8 @@ class InterviewerAgent(TorchGeneratorAgent):
             dict_agent=self.dict,
         )
         history.delimiter_tok = self.dict.sep_idx
+        if self.rl_mode and self.exploration_steps >0:
+            self.diverged_history = MultiDialogueHistory(self.opt, self.history_class())
         return history
 
     @classmethod
@@ -256,40 +257,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         """
         Train on a single batch of examples.
         """
-        # helps with memory usage
-        # note we want to use the opt's batchsize instead of the observed batch size
-        # in case dynamic batching is in use
-        self._init_cuda_buffer(self.opt['batchsize'], self.label_truncate or 256)
-        self.model.train()
-        self.zero_grad()
 
-        try:
-            loss = self.compute_loss(batch)
-            self.backward(loss)
-            self.update_params()
-            oom_sync = False
-        except RuntimeError as e:
-            # catch out of memory exceptions during fwd/bck (skip batch)
-            if 'out of memory' in str(e):
-                oom_sync = True
-                logging.error(
-                    'Ran out of memory, skipping batch. '
-                    'if this happens frequently, decrease batchsize or '
-                    'truncate the inputs to the model.'
-                )
-                self.global_metrics.add('skipped_batches', SumMetric(1))
-            else:
-                raise e
-
-        if oom_sync:
-            # moved outside of the try-except because the raised exception in scope
-            # actually prevents from the data being freed, which can sometimes cause
-            # us to OOM during our OOM handling.
-            # https://github.com/pytorch/pytorch/issues/18853#issuecomment-583779161
-
-            # gradients are synced on backward, now this model is going to be
-            # out of sync! catch up with the other workers
-            self._init_cuda_buffer(8, 8, True)
 
     def build_model(self):
         """
