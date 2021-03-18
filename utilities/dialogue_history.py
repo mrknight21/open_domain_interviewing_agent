@@ -1,12 +1,13 @@
 from parlai.core.message import Message
 from parlai.utils.misc import AttrDict
 from parlai.core.torch_agent import History, Optional
-from collections import  deque
+from collections import deque
+import copy
 
 
 class DialogueTurn(AttrDict):
 
-    def __init__(self, question_text, answer_text=None, log_prob= None, reward= None, **kwargs,):
+    def __init__(self, question_text, answer_text=None, log_prob=None, reward=None, **kwargs,):
         super().__init__(
             question=question_text,
             answer=answer_text,
@@ -16,46 +17,44 @@ class DialogueTurn(AttrDict):
         )
         self.complete = False
         self.generated = False
-        self.question  =question_text
+        self.question = question_text
         self.answer = answer_text
         self.log_prob = log_prob
         if log_prob:
             self.generated = True
         if self.question and self.answer:
             self.complete = True
-        self.items = (self.question, self.answer)
+
 
     def update(self, answer_text=None, log_prob=None, reward=None):
         if answer_text:
             self.anwer = answer_text
+            self.complete = True
         if log_prob:
             self.log_prob = log_prob
+            self.generated = True
         if reward:
             self.reward = reward
 
-    def __getitem__(self, key):
-        if isinstance(key, int):
-            return self.items[key]
-        else:
-            super().__getitem__(key)
 
 class DialogueHistory(History):
     def __init__(self, opt, **kwargs):
         self.sep_last_utt = opt.get('sep_last_utt', False)
         super().__init__(opt, **kwargs)
         self.context = None
+        self.dialogues = []
 
     def reset(self):
         """
         Clear the history.
         """
         self.history_raw_strings = []
-        self.dialogues = []
+
         self.history_strings = []
         self.history_vecs = []
         self.context = None
 
-    def _update_dialogues(self, text):
+    def _update_dialogues(self, text, log_prob=None):
         """
         Update the history dialogue with te given observation.
         dialogue is a tuple with index 0 from the others and the index 1 from self
@@ -63,11 +62,11 @@ class DialogueHistory(History):
         """
 
         if self.size > 0:
-            while len(self.history_dialogues) >= self.size/2:
+            while len(self.dialogues) >= self.size/2:
                 self.dialogues.pop(0)
-        dialogue = DialogueTurn(question_text=text)
+        dialogue = DialogueTurn(question_text=text, log_prob=log_prob)
         if self.dialogues and not self.dialogues[-1].complete:
-            self.dialogues[-1].update(text)
+            self.dialogues[-1].update(text, log_prob)
         else:
             self.dialogues.append(dialogue)
 
@@ -116,7 +115,7 @@ class DialogueHistory(History):
 
         return history
 
-    def add_reply(self, text):
+    def add_reply(self, text, log_prob=None):
         """
         Add your own response to the history.
         """
@@ -136,7 +135,13 @@ class MultiDialogueHistory(DialogueHistory):
     def __init__(self, opt, history_class, field='text', **kwargs):
         self.sep_last_utt = opt.get('sep_last_utt', False)
         self.history_cls_func = history_class
+        self.field = field
         self.lineages = []
+
+    def add_lineage(self, text, history, log_prob=None):
+        duplicated_history = copy.deepcopy(history)
+        duplicated_history.add_reply(text, log_prob=log_prob)
+        self.lineages.append(duplicated_history)
 
     def reset(self):
         """
@@ -152,22 +157,30 @@ class MultiDialogueHistory(DialogueHistory):
             history.update(text, one_temp_history)
 
     def get_history_str(self):
-        return None
+        if not self.lineages:
+            return []
+        return [hist.get_history_str for hist in self.lineages]
 
     def get_history_vec(self):
         """
         Return a vectorized version of the history.
         """
-        return None
+        if not self.lineages:
+            return []
+        return [hist.get_history_vec() for hist in self.lineages]
 
     def get_history_vec_list(self):
         """
         Return a list of history vecs.
         """
-        return None
+        if not self.lineages:
+            return []
+        return [hist.get_history_vec_list() for hist in self.lineages]
 
-    def add_reply(self, text):
+    def add_reply(self, texts):
         """
         Add your own response to the history.
         """
-        pass
+        for i, hist in enumerate(self.lineages):
+            text = texts[i]
+            self.lineages[i].add_reply(text)

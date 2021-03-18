@@ -156,7 +156,7 @@ class IntervieweeAgent(TorchSpanAgent):
         return history
 
     def _set_text_vec(self, obs, history, truncate, is_training=True):
-        tokenized_data = self.tokenize_one(obs)
+        tokenized_data = self.tokenize_from_history(obs)
         vectorized_data = util.map_data(tokenized_data, self.dict)
         features = util.generate_features(tokenized_data, vectorized_data, self.model.args['max_turns'])
         obs['text_vec'] = features
@@ -174,7 +174,6 @@ class IntervieweeAgent(TorchSpanAgent):
 
     
     def batchify(self, obs_batch, sort=False):
-        is_training = self.is_training
         batch = Batch(batchsize=0)
         if len(obs_batch) == 0:
             return batch
@@ -250,14 +249,16 @@ class IntervieweeAgent(TorchSpanAgent):
         batch_best_preds = outputs['pred']['outputs']
         return Output(batch_best_preds)
 
-    def tokenize_one(self, item):
-        strings_to_tokenize = [self.history.title, self.history.section_title, self.history.context, self.history.background]
+    def tokenize_from_history(self, item=None,  history=None):
+        if not history:
+            history = self.history
+        strings_to_tokenize = [history.title, history.section_title, history.context, history.background]
         qas = []
-        if len(self.history.history_dialogues) > 1:
+        if len(history.dialogues) > 1:
             for qa in self.history.history_dialogues[:-1]:
-                strings_to_tokenize.append(qa[0])
-                strings_to_tokenize.append(qa[1])
-                qas.append((qa[0], qa[1]))
+                strings_to_tokenize.append(qa.question)
+                strings_to_tokenize.append(qa.answer)
+                qas.append((qa.question, qa.answer))
         strings_to_tokenize.append(item['text'])
         strings_to_tokenize.append(item['single_label_text'])
         qas.append((item['text'], item['single_label_text']))
@@ -267,7 +268,10 @@ class IntervieweeAgent(TorchSpanAgent):
         ctx_offsets = [(st-offsets[2][0][0], en-offsets[2][0][0]) for st, en in offsets[2]]
         parsed_idx = 0
         for idx, qa in enumerate(qas):
-            cache = self.history.history_cache[idx]
+            if idx < len(qas) -1:
+                cache = self.history.history_cache[idx]
+            else:
+                cache = item
             item_yesno = cache.get('yesno')
             item_followup = cache.get('followup')
             ans_st = -1

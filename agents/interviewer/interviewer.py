@@ -1,10 +1,12 @@
 import os
+from typing import List, Tuple
 import torch
 from parlai.core.message import Message
 from parlai.core.torch_agent import Optional, Batch, Output
 from parlai.core.torch_generator_agent import TorchGeneratorAgent, PPLMetric, TorchGeneratorModel
 from parlai_internal.utilities.flow_lstm_util.dictionary_agent import InterviewDictionaryAgent
 from parlai.core.metrics import AverageMetric
+import parlai.utils.logging as logging
 from parlai_internal.agents.interviewee.interviewee import IntervieweeHistory
 from parlai_internal.utilities.flow_lstm_util.models.seq2seq import Seq2SeqModel
 from parlai_internal.utilities.flow_lstm_util.models import trainer
@@ -208,11 +210,9 @@ class InterviewerAgent(TorchGeneratorAgent):
         )
 
     def __init__(self, opt: Opt, shared=None):
-        super().__init__(opt, shared)
-
-        # set up model and optimizers
         self.rl_mode = opt['reinforcement_learning']
         self.exploration_steps = opt['exploration_steps']
+        super().__init__(opt, shared)
 
     @staticmethod
     def dictionary_class():
@@ -253,11 +253,6 @@ class InterviewerAgent(TorchGeneratorAgent):
         """
         return InterviewerHistory
 
-    def train_step(self, batch):
-        """
-        Train on a single batch of examples.
-        """
-
 
     def build_model(self):
         """
@@ -275,6 +270,22 @@ class InterviewerAgent(TorchGeneratorAgent):
         """
         return torch.nn.NLLLoss(ignore_index=constants.PAD_ID, reduction='none')
 
+    def self_observe(self, self_message: Message) -> None:
+        """
+        Observe one's own utterance.
+
+        This is used so that the agent can incorporate its own response into
+        the dialogue history after a batch_act. Failure to implement this will
+        result in an agent that cannot hear itself speak.
+
+        :param self_message:
+            The message corresponding to the output from batch_act.
+        """
+        if self.rl_mode and self.exploration_steps > 0 and self_message["text"] and not self_message['episode_done']:
+            self.diverged_history.add_lineage(self_message["text"], self.history, log_prob=self_message.get("log_probs", None))
+            self_message['history'] = self.history
+            self_message['diverged_history'] = self.diverged_history
+        super().self_observe(Message)
 
     def _set_text_vec(self, obs, history, truncate, is_training=True):
         tokenized_data = self.tokenize_from_history(obs)
@@ -316,7 +327,7 @@ class InterviewerAgent(TorchGeneratorAgent):
 
     def batchify(self, obs_batch, sort=False):
         is_training = self.is_training
-        batch = Batch(batchsize=0)
+        batch = Batch(batchsize=0, episode_done= obs_batch[0]['episode_done'])
         if len(obs_batch) == 0:
             return batch
         valid_obs = [(i, ex) for i, ex in enumerate(obs_batch) if self.is_valid(ex)]
@@ -355,48 +366,13 @@ class InterviewerAgent(TorchGeneratorAgent):
             text_vec=src,
             labels=inputs.get('tgt_text', None),
             text_lengths=src_text_numb,
-            observations=obs_batch
+            observations=obs_batch,
+            episode_end= obs_batch[0]['episode_done']
         )
         return batch
 
     def _init_cuda_buffer(self, batchsize, maxlen, force=False):
         return
-
-    # def _dummy_batch(self, batchsize, maxlen):
-    #     text_vec = (
-    #         torch.arange(1, maxlen + 1)  # need it as long as specified
-    #         .clamp(max=3)  # cap at 3 for testing with tiny dictionaries
-    #         .unsqueeze(0)
-    #         .expand(batchsize, 1, maxlen)
-    #         .cuda()
-    #     )
-    #     # label vec has two tokens to make it interesting, but we we can't use the
-    #     # start token, it's reserved.
-    #     label_vec = (
-    #         torch.LongTensor([self.end_idx, self.null_idx])
-    #         .unsqueeze(0)
-    #         .expand(batchsize, 2)
-    #         .cuda()
-    #     )
-    #     batch = Batch(
-    #         batchsize=batchsize,
-    #         valid_indices=range(batchsize),
-    #         src=text_vec,
-    #         src_char=text_vec,
-    #         bg=text_vec,
-    #         bg_char=text_vec,
-    #         tgt_in=text_vec,
-    #         tgt_out=text_vec,
-    #         tgt_out_char=text_vec,
-    #         turn_ids=torch.Tensor([0]).cuda(),
-    #         # this_turn=retval['this_turn'],
-    #         # label_vec=tgt_out[:, -1:, :],
-    #         text_vec=text_vec,
-    #         # labels=inputs.get('tgt_text', None),
-    #         text_lengths=torch.Tensor([maxlen]*batchsize).cuda(),
-    #         # observations=obs_batch
-    #     )
-    #     return batch
 
 
     def compute_loss(self, batch, return_output=False):
@@ -436,43 +412,58 @@ class InterviewerAgent(TorchGeneratorAgent):
         else:
             return loss
 
-    def eval_step(self, batch, return_output=False):
-        if batch.batchsize <= 0:
-            return
+    def train_step(self, batch):
+        """
+        Train on a single batch of examples.
+        """
+        output = None
+        if batch.batchsize <=0 and batch.episode_done:
+            if self.rl_mode:
+                self.reinforcement_backward_step()
+            return None
         else:
-            bsz = batch.batchsize
-        self.model.eval()
-        input = self._model_input(batch)
-        # only the output of the last turn
-        tgt_out = input['tgt_out'][:, -1:, :]
-        log_probs = self.model.sq2sq_model(**input)[-1:, :, :]
-        loss = self.criterion(log_probs.view(-1, self.dict.vocab_size), tgt_out.view(-1))
-        pred_seqs, _ = self.predict(batch)
-        texts = [" ".join(seq) for seq in pred_seqs]
-        text = texts[-1]
-        # preds = torch.stack(preds[-1])
-        # save loss to metrics
-        notnull = tgt_out.ne(self.dict.null_idx)
-        target_tokens = notnull.long().sum(dim=-1).view(1)
-        # correct = ((tgt_out == preds) * notnull).sum(dim=-1)
-        loss = loss.view(log_probs.shape[:-1]).sum(dim=1)
-        #
-        self.record_local_metric('loss', AverageMetric.many(loss, target_tokens))
-        self.record_local_metric('ppl', PPLMetric.many(loss, target_tokens))
-        # self.record_local_metric(
-        #     'token_acc', AverageMetric.many(correct, target_tokens)
-        # )
-        return Output(texts)
+            if self.rl_mode:
+                return self.rl_train_step(batch)
+            else:
+                return super().train_step(batch)
 
+    def rl_train_step(self, batch):
+        self.model.train()
+        maxlen = self.label_truncate or 256
+        beam_preds_scores, beams = self._generate(batch, self.beam_size, maxlen)
+        preds, scores = zip(*beam_preds_scores)
+        self._add_generation_metrics(batch, preds)
+        # bsz x beamsize
+        beam_texts: List[List[Tuple[str, float]]] = []
+        for beam in beams:
+            beam_texts.append([])
+            for tokens, score in beam.get_rescored_finished():
+                try:
+                    beam_texts[-1].append((self._v2t(tokens), score.item()))
+                except KeyError:
+                    logging.error("Decoding error: %s", tokens)
+                    continue
+        text = [self._v2t(p) for p in preds] if preds is not None else None
+        if text and self.compute_tokenized_bleu:
+            # compute additional bleu scores
+            self._compute_fairseq_bleu(batch, preds[0])
+            self._compute_nltk_bleu(batch, text[0])
+        retval = Output(text, log_probs=scores)
+        return retval
 
-    def tokenize_from_history(self, item):
-        strings_to_tokenize = [self.history.title, self.history.section_title, self.history.context, self.history.background]
+    def reinforcement_backward_step(self, batch):
+        return
+
+    def tokenize_from_history(self, item, history=None):
+        if not history:
+            history = self.history
+        strings_to_tokenize = [history.title, history.section_title, history.context, history.background]
         qas = []
-        if len(self.history.history_dialogues) > 0:
-            for qa in self.history.history_dialogues:
-                strings_to_tokenize.append(qa[0])
-                strings_to_tokenize.append(qa[1])
-                qas.append((qa[0], qa[1]))
+        if len(history.history_dialogues) > 0:
+            for turn in history.history_dialogues:
+                strings_to_tokenize.append(turn.question)
+                strings_to_tokenize.append(turn.answer)
+                qas.append((turn.question, turn.answer))
         strings_to_tokenize.append(item['single_label_text'])
         strings_to_tokenize.append(item['text'])
         qas.append((item['single_label_text'], ""))
@@ -531,21 +522,18 @@ class InterviewerAgent(TorchGeneratorAgent):
         return {'src': batch['src'], 'src_mask': src_mask, 'turn_ids': batch['turn_ids'],
                 'tgt_in': batch['tgt_in'], 'bg': batch['bg'], 'bg_mask': bg_mask, 'tgt_out': batch['tgt_out']}
 
-    def predict(self, batch, beam_size=1, return_pair_level=False, return_preds=False, return_rewards=False):
+    def predict(self, batch, beam_size=1, return_pair_level=False):
         inputs = trainer.unpack_batch(batch, self.use_cuda)
         src, tgt_in, tgt_out, turn_ids = \
             inputs['src'], inputs['tgt_in'], inputs['tgt_out'], inputs['turn_ids']
         bg = inputs.get('bg', None)
         src_mask = src.eq(constants.PAD_ID)
         bg_mask = bg.eq(constants.PAD_ID) if bg is not None else None
-
-        if not return_preds:
-            self.model.eval()
         batch_size = src.size(0)
-        preds = self.model.sq2sq_model.predict(src, src_mask, turn_ids, beam_size=beam_size, bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level)
+        preds, log_probs = self.model.sq2sq_model.predict(src, src_mask, turn_ids, beam_size=beam_size, bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level)
         pred_seqs = [[self.dict.ind2tok[id_] for id_ in ids] for ids in preds] # unmap to tokens
         pred_seqs = util.prune_decoded_seqs(pred_seqs)
-        return pred_seqs, preds
+        return pred_seqs, log_probs
 
     def sample(self, batch, top_p=1, return_pair_level=False, return_preds=False):
         inputs = trainer.unpack_batch(batch, self.use_cuda)
