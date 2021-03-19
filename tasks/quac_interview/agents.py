@@ -93,14 +93,17 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
 
     def get(self, episode_idx, entry_idx=None):
         action = super().get(episode_idx, entry_idx)
-        action['model_output'] = []
+        action['model_answers'] = []
         histories = []
+        model_answers = []
         if len(self.history.dialogues) > 0:
             histories.append(self.history)
         if self.diverged_history and len(self.diverged_history.lineages) > 0:
             histories.extend(self.diverged_history.lineages)
         if histories:
-            model_answer = self.get_model_answer(histories, action)
+            model_answers = self.get_model_answer(histories, action)
+        if model_answers:
+            action['model_answers'] = model_answers
         return action
 
 
@@ -125,11 +128,15 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
             batch = self.batchify(retvals)
             _, reward, reward_items, _, preds = self.model(**self._model_input(batch))
             logits, outputs = preds['logits'], preds['outputs']
+            # update each retval with the output answers and also swap the question and text key
             for i, retval in enumerate(retvals):
                 retval['text'] = outputs[i]
+                retval['single_label_text'] = original_question
                 retval['yesno'] = int(logits['yesno'][i].argmax())
                 retval['followup'] = int(logits['followup'][i].argmax())
                 retval['token_start_end'] = (int(logits['start'][i].argmax()), int(logits['end'][i].argmax()))
+                retval['reward'] = reward
+                retval['reward_items'] = reward_items
         return retvals
 
     def get_reward(self, history):

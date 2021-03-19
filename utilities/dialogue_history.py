@@ -13,13 +13,10 @@ class DialogueTurn(AttrDict):
             answer=answer_text,
             log_prob=log_prob,
             reward=reward,
+            complete=False,
+            generated=False,
             **kwargs,
         )
-        self.complete = False
-        self.generated = False
-        self.question = question_text
-        self.answer = answer_text
-        self.log_prob = log_prob
         if log_prob:
             self.generated = True
         if self.question and self.answer:
@@ -30,10 +27,10 @@ class DialogueTurn(AttrDict):
         if answer_text:
             self.anwer = answer_text
             self.complete = True
-        if log_prob:
+        if log_prob is not None:
             self.log_prob = log_prob
             self.generated = True
-        if reward:
+        if reward is not None:
             self.reward = reward
 
 
@@ -54,7 +51,7 @@ class DialogueHistory(History):
         self.history_vecs = []
         self.context = None
 
-    def _update_dialogues(self, text, log_prob=None):
+    def _update_dialogues(self, text, log_prob=None, reward=None):
         """
         Update the history dialogue with te given observation.
         dialogue is a tuple with index 0 from the others and the index 1 from self
@@ -64,9 +61,9 @@ class DialogueHistory(History):
         if self.size > 0:
             while len(self.dialogues) >= self.size/2:
                 self.dialogues.pop(0)
-        dialogue = DialogueTurn(question_text=text, log_prob=log_prob)
-        if self.dialogues and not self.dialogues[-1].complete:
-            self.dialogues[-1].update(text, log_prob)
+        dialogue = DialogueTurn(question_text=text, log_prob=log_prob, reward=reward)
+        if self.dialogues and not self.dialogues[-1]['complete']:
+            self.dialogues[-1].update(text, log_prob=log_prob, reward=reward)
         else:
             self.dialogues.append(dialogue)
 
@@ -83,6 +80,8 @@ class DialogueHistory(History):
             history.
         """
         if "text" in obs and obs["text"] is not None:
+            log_prob = obs.get('log_prob', None)
+            reward = obs.get('reward', None)
             if not self.context and obs.get('context', None):
                     self.context = obs['context']
             text = obs['text']
@@ -94,7 +93,7 @@ class DialogueHistory(History):
             # update history string
             self._update_strings(text)
             # update history dialogues
-            self._update_dialogues(text)
+            self._update_dialogues(text, log_prob=log_prob, reward=reward)
             # update history vecs
             self._update_vecs(text)
         self.temp_history = temp_history
@@ -115,7 +114,7 @@ class DialogueHistory(History):
 
         return history
 
-    def add_reply(self, text, log_prob=None):
+    def add_reply(self, text, log_prob=None, reward=None):
         """
         Add your own response to the history.
         """
@@ -127,7 +126,7 @@ class DialogueHistory(History):
         # update history vecs
         self._update_vecs(text)
         # update history dialogues
-        self._update_dialogues(text)
+        self._update_dialogues(text, log_prob=log_prob, reward=reward)
 
 
 class MultiDialogueHistory(DialogueHistory):
@@ -138,10 +137,13 @@ class MultiDialogueHistory(DialogueHistory):
         self.field = field
         self.lineages = []
 
-    def add_lineage(self, text, history, log_prob=None):
+    def add_lineage(self, text, history, message=None, log_prob=None, reward=None, cache=None):
         duplicated_history = copy.deepcopy(history)
-        duplicated_history.add_reply(text, log_prob=log_prob)
-        self.lineages.append(duplicated_history)
+        if message:
+            duplicated_history.update_history(message)
+        else:
+            duplicated_history.add_reply(text, log_prob=log_prob, reward=reward)
+        self.lineages = [duplicated_history] + self.lineages
 
     def reset(self):
         """
@@ -150,11 +152,12 @@ class MultiDialogueHistory(DialogueHistory):
         self.lineages = []
 
     def update_history(self, obs: Message, temp_history: Optional[str] = None):
+        assert len(obs) == len(self.lineages)
         for i, history in self.lineages:
             if temp_history:
                 one_temp_history = temp_history[0]
-            text = Message[self.field][i]
-            history.update(text, one_temp_history)
+            retval = obs[i]
+            history.update_history(obs, one_temp_history)
 
     def get_history_str(self):
         if not self.lineages:

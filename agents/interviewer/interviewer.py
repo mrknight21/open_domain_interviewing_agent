@@ -1,6 +1,7 @@
 import os
 from typing import List, Tuple
 import torch
+import copy
 from parlai.core.message import Message
 from parlai.core.torch_agent import Optional, Batch, Output
 from parlai.core.torch_generator_agent import TorchGeneratorAgent, PPLMetric, TorchGeneratorModel
@@ -38,6 +39,8 @@ class InterviewerHistory(IntervieweeHistory):
             history.
         """
         if "text" in obs and obs["text"] is not None:
+            log_prob = obs.get('log_prob', None)
+            reward = obs.get('reward', None)
             if not self.context and obs.get('context', None):
                     self.context = obs['context']
             if not self.background and obs.get('background', None):
@@ -59,7 +62,7 @@ class InterviewerHistory(IntervieweeHistory):
                 # update history string
                 self._update_strings(text)
                 # update history dialogues
-                self._update_dialogues(text)
+                self._update_dialogues(text, log_prob=log_prob, reward=reward)
                 # update history vecs
                 self._update_vecs(text)
                 self._update_cache(obs)
@@ -244,6 +247,28 @@ class InterviewerAgent(TorchGeneratorAgent):
             self.diverged_history = MultiDialogueHistory(self.opt, self.history_class())
         return history
 
+    def diverged_history_update(self, observation):
+        """
+        This method update or harvest the diverged lineage history.
+        The first answer is the model output for the most recent teacher force history
+        The rest items follwo the index of the lineages
+        :param model_outputs: observation with 'model_answer'
+        :return: Update the diverged_history object
+        """
+        if 'model_answers' not in observation:
+            return None
+        model_output = observation['model_answers']
+        for i, retval in enumerate(model_output):
+            text = retval['text']
+            reward = retval['reward']
+            reward_items = retval['reward_items']
+            if i == 0:
+                self.diverged_history.add_lineage(text, self.history, message=retval, reward=reward)
+            else:
+                self.diverged_history.lineages[i].update_history(retval)
+
+
+
     @classmethod
     def history_class(cls):
         """
@@ -270,6 +295,12 @@ class InterviewerAgent(TorchGeneratorAgent):
         """
         return torch.nn.NLLLoss(ignore_index=constants.PAD_ID, reduction='none')
 
+    def observe(self, observation):
+        if self.rl_mode and len(self.diverged_history.lineages) > 0:
+            self.diverged_history_update(observation)
+        super().observe(observation)
+
+
     def self_observe(self, self_message: Message) -> None:
         """
         Observe one's own utterance.
@@ -288,10 +319,24 @@ class InterviewerAgent(TorchGeneratorAgent):
         super().self_observe(Message)
 
     def _set_text_vec(self, obs, history, truncate, is_training=True):
-        tokenized_data = self.tokenize_from_history(obs)
-        vectorized_data = util.map_data(tokenized_data, self.dict)
-        features = util.generate_features(tokenized_data, vectorized_data, self.model.config['max_turns'])
-        obs['text_vec'] = features
+        histories = [self.history]
+        original_answer = obs['text']
+        original_question = obs['single_label_text']
+        retvals = []
+        if len(self.diverged_history.lineages) > 0:
+            histories += self.diverged_history.lineages
+        for hist in histories:
+            retval = copy.copy(obs)
+            if hist.dialogues:
+                retval.force_set('text', hist.dialogues[-1].answer)
+            tokenized_data = self.tokenize_from_history(retval, history)
+            vectorized_data = util.map_data(tokenized_data, self.dict)
+            features = util.generate_features(tokenized_data, vectorized_data, self.model.config['max_turns'])
+            retval['text_vec'] = features
+            retvals.append(retval)
+        obs['text_vec'] = retvals[0]['text_vec']
+        if len(retvals) > 1:
+            obs['diverged_obs'] = retvals[1:]
         labels_with_special_tokens = []
         for l in obs.get('labels', obs.get('eval_labels', [])):
             if l == "":
