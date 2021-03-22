@@ -14,72 +14,6 @@ from parlai_internal.utilities.flow_lstm_util.dictionary_agent import InterviewD
 
 
 
-class IntervieweeHistory(DialogueHistory):
-
-    def __init__(self, opt, **kwargs):
-        self.sep_last_utt = opt.get('sep_last_utt', False)
-        super().__init__(opt, **kwargs)
-        self.title = None
-        self.background = None
-        self.section_title = None
-        self.history_cache = []
-
-    def reset(self):
-        """
-        Clear the history.
-        """
-        self.history_raw_strings = []
-        self.history_cache = []
-        self.history_dialogues = []
-        self.history_strings = []
-        self.history_vecs = []
-        self.context = None
-        self.title = None
-        self.background = None
-        self.section_title = None
-
-    def _update_cache(self, obs):
-        cache = {
-            'character_start_end': obs['character_start_end'],
-            'yesno': obs['yesno'], 'followup': obs['followup']}
-        self.history_cache.append(cache)
-
-    def update_history(self, obs: Message, temp_history: Optional[str] = None):
-        """
-        Update the history with the given observation.
-
-        :param obs:
-            Observation used to update the history.
-        :param temp_history:
-            Optional temporary string. If it is not None, this string will be
-            appended to the end of the history. It will not be in the history
-            on the next dialogue turn. Set to None to stop adding to the
-            history.
-        """
-        if "text" in obs and obs["text"] is not None:
-            if not self.context and obs.get('context', None):
-                    self.context = obs['context']
-            if not self.background and obs.get('background', None):
-                    self.background = obs['background']
-            if not self.title and obs.get('title', None):
-                    self.title = obs['title']
-            if not self.section_title and obs.get('section_title', None):
-                    self.section_title = obs['section_title']
-            text = obs['text']
-            self._update_raw_strings(text)
-            if self.add_person_tokens:
-                text = self._add_person_tokens(
-                    obs[self.field], self.p1_token, self.add_p1_after_newln
-                )
-            # update history string
-            self._update_strings(text)
-            # update history dialogues
-            self._update_dialogues(text)
-            # update history vecs
-            self._update_vecs(text)
-            self._update_cache(obs)
-        self.temp_history = temp_history
-
 class IntervieweeAgent(TorchSpanAgent):
     """
     Interviewee agent.
@@ -134,7 +68,7 @@ class IntervieweeAgent(TorchSpanAgent):
 
         Can be overriden if a more complex history is required.
         """
-        return IntervieweeHistory
+        return DialogueHistory
 
     def build_history(self):
         """
@@ -249,13 +183,14 @@ class IntervieweeAgent(TorchSpanAgent):
         batch_best_preds = outputs['pred']['outputs']
         return Output(batch_best_preds)
 
-    def tokenize_from_history(self, item=None,  history=None):
-        if not history:
-            history = self.history
+    def tokenize_from_history(self, item=None,  dialogues=None):
+        history = self.history
+        if not dialogues:
+            dialogues = history.dialogues
         strings_to_tokenize = [history.title, history.section_title, history.context, history.background]
         qas = []
-        if len(history.dialogues) > 1:
-            for qa in self.history.history_dialogues[:-1]:
+        if len(dialogues) > 1:
+            for qa in dialogues[:-1]:
                 strings_to_tokenize.append(qa.question)
                 strings_to_tokenize.append(qa.answer)
                 qas.append((qa.question, qa.answer))
@@ -269,7 +204,7 @@ class IntervieweeAgent(TorchSpanAgent):
         parsed_idx = 0
         for idx, qa in enumerate(qas):
             if idx < len(qas) -1:
-                cache = self.history.history_cache[idx]
+                cache = dialogues[idx].cache
             else:
                 cache = item
             item_yesno = cache.get('yesno')

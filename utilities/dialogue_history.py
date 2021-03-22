@@ -1,37 +1,43 @@
 from parlai.core.message import Message
-from parlai.utils.misc import AttrDict
 from parlai.core.torch_agent import History, Optional
 from collections import deque
+import torch
 import copy
 
+class DialogueTurn(object):
 
-class DialogueTurn(AttrDict):
+    question: Optional[str]
+    answer: Optional[str]
+    log_prob: Optional[torch.LongTensor]
+    reward: Optional[torch.LongTensor]
+    complete: bool
+    generated: bool
 
-    def __init__(self, question_text, answer_text=None, log_prob=None, reward=None, **kwargs,):
-        super().__init__(
-            question=question_text,
-            answer=answer_text,
-            log_prob=log_prob,
-            reward=reward,
-            complete=False,
-            generated=False,
-            **kwargs,
-        )
-        if log_prob:
+    def __init__(self, question_text, answer_text=None, log_prob=None, reward=None, cache=None):
+        self.question = question_text
+        self.answer = answer_text
+        self.log_prob = log_prob
+        self.reward = reward
+        self.cache = cache
+        self.generated = False
+        self.complete = False
+        if log_prob is not None:
             self.generated = True
         if self.question and self.answer:
             self.complete = True
 
 
-    def update(self, answer_text=None, log_prob=None, reward=None):
+    def update(self, answer_text=None, log_prob=None, reward=None, cache=None):
         if answer_text:
-            self.anwer = answer_text
+            self.answer = answer_text
             self.complete = True
         if log_prob is not None:
             self.log_prob = log_prob
             self.generated = True
         if reward is not None:
             self.reward = reward
+        if cache is not None:
+            self.cache = cache
 
 
 class DialogueHistory(History):
@@ -40,18 +46,24 @@ class DialogueHistory(History):
         super().__init__(opt, **kwargs)
         self.context = None
         self.dialogues = []
+        self.title = None
+        self.background = None
+        self.section_title = None
 
     def reset(self):
         """
         Clear the history.
         """
         self.history_raw_strings = []
-
+        self.dialogues = []
         self.history_strings = []
         self.history_vecs = []
         self.context = None
+        self.title = None
+        self.background = None
+        self.section_title = None
 
-    def _update_dialogues(self, text, log_prob=None, reward=None):
+    def _update_dialogues(self, text, log_prob=None, reward=None, cache=None):
         """
         Update the history dialogue with te given observation.
         dialogue is a tuple with index 0 from the others and the index 1 from self
@@ -61,11 +73,18 @@ class DialogueHistory(History):
         if self.size > 0:
             while len(self.dialogues) >= self.size/2:
                 self.dialogues.pop(0)
-        dialogue = DialogueTurn(question_text=text, log_prob=log_prob, reward=reward)
-        if self.dialogues and not self.dialogues[-1]['complete']:
-            self.dialogues[-1].update(text, log_prob=log_prob, reward=reward)
+        dialogue = DialogueTurn(question_text=text, log_prob=log_prob, reward=reward, cache=cache)
+        if self.dialogues and not self.dialogues[-1].complete:
+            self.dialogues[-1].update(text, log_prob=log_prob, reward=reward, cache=cache)
         else:
             self.dialogues.append(dialogue)
+
+    def get_cache(self, obs):
+        cache = {
+            'character_start_end': obs.get('character_start_end', None),
+            'token_start_end': obs.get('token_start_end', None),
+            'yesno': obs['yesno'], 'followup': obs['followup']}
+        return cache
 
     def update_history(self, obs: Message, temp_history: Optional[str] = None):
         """
@@ -82,9 +101,16 @@ class DialogueHistory(History):
         if "text" in obs and obs["text"] is not None:
             log_prob = obs.get('log_prob', None)
             reward = obs.get('reward', None)
+            text = obs['text']
+            cache = self.get_cache(obs)
             if not self.context and obs.get('context', None):
                     self.context = obs['context']
-            text = obs['text']
+            if not self.background and obs.get('background', None):
+                    self.background = obs['background']
+            if not self.title and obs.get('title', None):
+                    self.title = obs['title']
+            if not self.section_title and obs.get('section_title', None):
+                    self.section_title = obs['section_title']
             self._update_raw_strings(text)
             if self.add_person_tokens:
                 text = self._add_person_tokens(
@@ -93,7 +119,7 @@ class DialogueHistory(History):
             # update history string
             self._update_strings(text)
             # update history dialogues
-            self._update_dialogues(text, log_prob=log_prob, reward=reward)
+            self._update_dialogues(text, log_prob=log_prob, reward=reward, cache=cache)
             # update history vecs
             self._update_vecs(text)
         self.temp_history = temp_history
@@ -129,61 +155,60 @@ class DialogueHistory(History):
         self._update_dialogues(text, log_prob=log_prob, reward=reward)
 
 
-class MultiDialogueHistory(DialogueHistory):
+class Lineage(object):
 
-    def __init__(self, opt, history_class, field='text', **kwargs):
-        self.sep_last_utt = opt.get('sep_last_utt', False)
-        self.history_cls_func = history_class
-        self.field = field
-        self.lineages = []
-
-    def add_lineage(self, text, history, message=None, log_prob=None, reward=None, cache=None):
-        duplicated_history = copy.deepcopy(history)
-        if message:
-            duplicated_history.update_history(message)
+    def __init__(self, dialogues):
+        if not dialogues:
+            self.dialogues = []
         else:
-            duplicated_history.add_reply(text, log_prob=log_prob, reward=reward)
-        self.lineages = [duplicated_history] + self.lineages
+            self.dialogues = copy.deepcopy(dialogues)
+
+    def _update_dialogues(self, text, log_prob=None, reward=None, cache=None):
+        """
+        Update the history dialogue with te given observation.
+        dialogue is a tuple with index 0 from the others and the index 1 from self
+        :param text: the current observed utterance text
+        """
+
+        dialogue = DialogueTurn(question_text=text, log_prob=log_prob, reward=reward, cache=cache)
+        if self.dialogues and not self.dialogues[-1].complete:
+            self.dialogues[-1].update(text, log_prob=log_prob, reward=reward, cache=cache)
+        else:
+            self.dialogues.append(dialogue)
+
+class DialogueLineages(object):
+
+    def __init__(self):
+        self.lineages = deque()
 
     def reset(self):
-        """
-        Clear the history.
-        """
-        self.lineages = []
+        self.lineages = deque()
 
-    def update_history(self, obs: Message, temp_history: Optional[str] = None):
-        assert len(obs) == len(self.lineages)
-        for i, history in self.lineages:
-            if temp_history:
-                one_temp_history = temp_history[0]
-            retval = obs[i]
-            history.update_history(obs, one_temp_history)
+    def get_cache(self, obs):
+        cache = {
+            'character_start_end': obs.get('character_start_end', None),
+            'token_start_end': obs.get('token_start_end', None),
+            'yesno': obs['yesno'], 'followup': obs['followup']}
+        return cache
 
-    def get_history_str(self):
-        if not self.lineages:
-            return []
-        return [hist.get_history_str for hist in self.lineages]
+    def add_lineage(self, text, history, message=None, log_prob=None, reward=None, cache=None):
+        new_lineage = Lineage(history.dialogues)
+        if message:
+            # create new lineage from ground truth answer
+            cache = self.get_cache(message)
+            reward = message
+            log_prob = message.get('log_prob', None)
+            reward = message.get('reward', None)
+            text = message.get('text', "")
+            new_lineage._update_dialogues(text, log_prob=log_prob, reward=reward, cache=cache)
+        else:
+            # create new lineage from ground truth question
+            new_lineage._update_dialogues(text, log_prob=log_prob, reward=reward, cache=cache)
+        self.lineages.appendleft(new_lineage)
 
-    def get_history_vec(self):
-        """
-        Return a vectorized version of the history.
-        """
-        if not self.lineages:
-            return []
-        return [hist.get_history_vec() for hist in self.lineages]
+    def get_dialogues(self):
+        dialogues = []
+        for l in self.lineages:
+            dialogues.append(l.dialogues)
+        return dialogues
 
-    def get_history_vec_list(self):
-        """
-        Return a list of history vecs.
-        """
-        if not self.lineages:
-            return []
-        return [hist.get_history_vec_list() for hist in self.lineages]
-
-    def add_reply(self, texts):
-        """
-        Add your own response to the history.
-        """
-        for i, hist in enumerate(self.lineages):
-            text = texts[i]
-            self.lineages[i].add_reply(text)

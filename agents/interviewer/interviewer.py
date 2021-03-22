@@ -8,23 +8,18 @@ from parlai.core.torch_generator_agent import TorchGeneratorAgent, PPLMetric, To
 from parlai_internal.utilities.flow_lstm_util.dictionary_agent import InterviewDictionaryAgent
 from parlai.core.metrics import AverageMetric
 import parlai.utils.logging as logging
-from parlai_internal.agents.interviewee.interviewee import IntervieweeHistory
+
 from parlai_internal.utilities.flow_lstm_util.models.seq2seq import Seq2SeqModel
 from parlai_internal.utilities.flow_lstm_util.models import trainer
 from parlai_internal.utilities.flow_lstm_util import constants, util
-from parlai_internal.utilities.dialogue_history import MultiDialogueHistory
+from parlai_internal.utilities.dialogue_history import DialogueHistory, DialogueLineages
 from parlai.core.params import ParlaiParser
 from parlai.core.opt import Opt
 
 
 
-class InterviewerHistory(IntervieweeHistory):
+class InterviewerHistory(DialogueHistory):
 
-    def _update_cache(self, obs):
-        cache = {
-            'character_start_end': obs['character_start_end'],
-            'yesno': obs['yesno'], 'followup': obs['followup']}
-        self.history_cache.append(cache)
 
     def update_history(self, obs: Message, temp_history: Optional[str] = None):
         """
@@ -38,9 +33,9 @@ class InterviewerHistory(IntervieweeHistory):
             on the next dialogue turn. Set to None to stop adding to the
             history.
         """
-        if "text" in obs and obs["text"] is not None:
-            log_prob = obs.get('log_prob', None)
-            reward = obs.get('reward', None)
+        if "text" in obs and obs["text"]:
+            super().update_history(obs, temp_history)
+        else:
             if not self.context and obs.get('context', None):
                     self.context = obs['context']
             if not self.background and obs.get('background', None):
@@ -49,23 +44,6 @@ class InterviewerHistory(IntervieweeHistory):
                     self.title = obs['title']
             if not self.section_title and obs.get('section_title', None):
                     self.section_title = obs['section_title']
-            text = obs['text']
-            if text:
-                if "|" in text:
-                    texts = text.split('|')
-                    text = max(texts, key=len)
-                self._update_raw_strings(text)
-                if self.add_person_tokens:
-                    text = self._add_person_tokens(
-                        obs[self.field], self.p1_token, self.add_p1_after_newln
-                    )
-                # update history string
-                self._update_strings(text)
-                # update history dialogues
-                self._update_dialogues(text, log_prob=log_prob, reward=reward)
-                # update history vecs
-                self._update_vecs(text)
-                self._update_cache(obs)
         self.temp_history = temp_history
 
 class Sq2SqQuestionGenerationModel(TorchGeneratorModel):
@@ -244,16 +222,16 @@ class InterviewerAgent(TorchGeneratorAgent):
         )
         history.delimiter_tok = self.dict.sep_idx
         if self.rl_mode and self.exploration_steps >0:
-            self.diverged_history = MultiDialogueHistory(self.opt, self.history_class())
+            self.diverged_dialogues = DialogueLineages()
         return history
 
-    def diverged_history_update(self, observation):
+    def diverged_dialogues_update(self, observation):
         """
         This method update or harvest the diverged lineage history.
         The first answer is the model output for the most recent teacher force history
         The rest items follwo the index of the lineages
         :param model_outputs: observation with 'model_answer'
-        :return: Update the diverged_history object
+        :return: Update the diverged_dialogues object
         """
         if 'model_answers' not in observation:
             return None
@@ -262,10 +240,11 @@ class InterviewerAgent(TorchGeneratorAgent):
             text = retval['text']
             reward = retval['reward']
             reward_items = retval['reward_items']
+            cache = self.diverged_dialogues.get_cache(retval)
             if i == 0:
-                self.diverged_history.add_lineage(text, self.history, message=retval, reward=reward)
+                self.diverged_dialogues.add_lineage(text, self.history, message=retval, reward=reward)
             else:
-                self.diverged_history.lineages[i].update_history(retval)
+                self.diverged_dialogues.lineages[i]._update_dialogues(text, reward=reward, cache=cache)
 
 
 
@@ -296,8 +275,8 @@ class InterviewerAgent(TorchGeneratorAgent):
         return torch.nn.NLLLoss(ignore_index=constants.PAD_ID, reduction='none')
 
     def observe(self, observation):
-        if self.rl_mode and len(self.diverged_history.lineages) > 0:
-            self.diverged_history_update(observation)
+        if self.rl_mode and len(self.diverged_dialogues.lineages) > 0:
+            self.diverged_dialogues_update(observation)
         super().observe(observation)
 
 
@@ -313,23 +292,23 @@ class InterviewerAgent(TorchGeneratorAgent):
             The message corresponding to the output from batch_act.
         """
         if self.rl_mode and self.exploration_steps > 0 and self_message["text"] and not self_message['episode_done']:
-            self.diverged_history.add_lineage(self_message["text"], self.history, log_prob=self_message.get("log_probs", None))
-            self_message['history'] = self.history
-            self_message['diverged_history'] = self.diverged_history
+            self.diverged_dialogues.add_lineage(self_message["text"], self.history, log_prob=self_message.get("log_probs", None))
+            self_message['diverged_dialogues'] = self.diverged_dialogues
         super().self_observe(Message)
+        self_message['history'] = self.history
 
     def _set_text_vec(self, obs, history, truncate, is_training=True):
-        histories = [self.history]
-        original_answer = obs['text']
-        original_question = obs['single_label_text']
+        history_dialogues = [self.history.dialogues]
+        # original_answer = obs['text']
+        # original_question = obs['single_label_text']
         retvals = []
-        if len(self.diverged_history.lineages) > 0:
-            histories += self.diverged_history.lineages
-        for hist in histories:
+        if len(self.diverged_dialogues.lineages) > 0:
+            history_dialogues += [lineage.dialogues for lineage in self.diverged_dialogues.lineages]
+        for dialogues in history_dialogues:
             retval = copy.copy(obs)
-            if hist.dialogues:
-                retval.force_set('text', hist.dialogues[-1].answer)
-            tokenized_data = self.tokenize_from_history(retval, history)
+            if dialogues:
+                retval.force_set('text', dialogues[-1].answer)
+            tokenized_data = self.tokenize_from_history(retval, dialogues)
             vectorized_data = util.map_data(tokenized_data, self.dict)
             features = util.generate_features(tokenized_data, vectorized_data, self.model.config['max_turns'])
             retval['text_vec'] = features
@@ -375,6 +354,8 @@ class InterviewerAgent(TorchGeneratorAgent):
         batch = Batch(batchsize=0, episode_done= obs_batch[0]['episode_done'])
         if len(obs_batch) == 0:
             return batch
+        # if self.rl_mode and self.exploration_steps > 0 and len(self.diverged_dialogues.lineages) >0:
+        #     ex = ex
         valid_obs = [(i, ex) for i, ex in enumerate(obs_batch) if self.is_valid(ex)]
         if len(valid_obs) == 0:
             return batch
@@ -499,16 +480,20 @@ class InterviewerAgent(TorchGeneratorAgent):
     def reinforcement_backward_step(self, batch):
         return
 
-    def tokenize_from_history(self, item, history=None):
-        if not history:
-            history = self.history
+    def tokenize_from_history(self, item, dialogues=None):
+        history = self.history
+        if not dialogues:
+            dialogues = history.dialogues
         strings_to_tokenize = [history.title, history.section_title, history.context, history.background]
         qas = []
-        if len(history.history_dialogues) > 0:
-            for turn in history.history_dialogues:
-                strings_to_tokenize.append(turn.question)
-                strings_to_tokenize.append(turn.answer)
-                qas.append((turn.question, turn.answer))
+        if len(dialogues) > 0:
+            for turn in dialogues:
+                try:
+                    strings_to_tokenize.append(turn.question)
+                    strings_to_tokenize.append(turn.answer)
+                    qas.append((turn.question, turn.answer))
+                except AttributeError as e:
+                    print(e)
         strings_to_tokenize.append(item['single_label_text'])
         strings_to_tokenize.append(item['text'])
         qas.append((item['single_label_text'], ""))

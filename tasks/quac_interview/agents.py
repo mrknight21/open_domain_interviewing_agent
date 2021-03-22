@@ -87,36 +87,36 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
             self.model.cuda()
         self.truncate = self.dict.maxtokens
         self.history = self.build_history()
-        self.diverged_history = None
+        self.diverged_dialogues = None
         super().__init__(opt, shared)
 
 
     def get(self, episode_idx, entry_idx=None):
         action = super().get(episode_idx, entry_idx)
         action['model_answers'] = []
-        histories = []
+        histories_dialogues = []
         model_answers = []
         if len(self.history.dialogues) > 0:
-            histories.append(self.history)
-        if self.diverged_history and len(self.diverged_history.lineages) > 0:
-            histories.extend(self.diverged_history.lineages)
-        if histories:
-            model_answers = self.get_model_answer(histories, action)
+            histories_dialogues.append(self.history.dialogues)
+        if self.diverged_dialogues and len(self.diverged_dialogues) > 0:
+            histories_dialogues.extend(self.diverged_dialogues)
+        if histories_dialogues:
+            model_answers = self.get_model_answer(histories_dialogues, action)
         if model_answers:
             action['model_answers'] = model_answers
         return action
 
 
-    def get_model_answer(self, histories, action):
+    def get_model_answer(self, histories_dialogues, action):
         retvals = []
         outputs = None
         original_answer = action['text']
         original_question = action['single_label_text']
-        for history in histories:
+        for dialogues in histories_dialogues:
             obs = copy.copy(action)
-            obs['text'] = history.dialogues[-1].question
+            obs['text'] = dialogues[-1].question
             obs['single_label_text'] = original_answer
-            tokenized_data = self.tokenize_from_history(obs, history)
+            tokenized_data = self.tokenize_from_history(obs, dialogues)
             vectorized_data = util.map_data(tokenized_data, self.dict)
             features = util.generate_features(tokenized_data, vectorized_data, self.model.args['max_turns'])
             obs['text_vec'] = features
@@ -152,6 +152,7 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         super().observe(observation)
         if 'history' in observation:
             self.history = observation['history']
-        if 'diverged_history' in observation:
-            self.diverged_history = observation['diverged_history']
+        if 'diverged_dialogues' in observation:
+            diverged_dialogues = observation['diverged_dialogues']
+            self.diverged_dialogues = diverged_dialogues.get_dialogues()
         return observation
