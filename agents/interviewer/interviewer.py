@@ -56,15 +56,26 @@ class Sq2SqQuestionGenerationModel(TorchGeneratorModel):
         self.sq2sq_model = self.load_question_generation_model(opt, dict)
         self.config = self.sq2sq_model.args
 
-    def encoder(self, src, src_mask, bg, bg_mask, turn_ids=None, last_state_only=True):
+    def encoder(self, src, src_mask, bg, bg_mask, turn_ids=None):
         # prepare for encoder/
-        h_in, src_mask, (hn, cn), h_bg = self.sq2sq_model.encode_sources(src, src_mask, bg, bg_mask, turn_ids=turn_ids)
-        if last_state_only:
-            return {'h_in': h_in[-1:, :, :], 'src_mask': src_mask[-1:, :], 'hn': hn[:, -1:, :], 'cn': cn[:, -1:, :],
-                    'h_bg': h_bg[-1:, :], 'turn_ids': turn_ids[:, -1:, :]}
+        bs, ts = src.size()[:2]
+        embed_d = self.sq2sq_model.dec_hidden_dim
+        #get the last turn encoding for each batched conversation lineages
+        if self.sq2sq_model.use_cuda:
+            indices = torch.arange(bs).cuda()*ts
         else:
-            return {'h_in': h_in, 'src_mask': src_mask, 'hn': hn, 'cn': cn,
-                    'h_bg': h_bg, 'turn_ids': turn_ids}
+            indices = torch.arange(bs)*ts
+        assert len(indices) == bs
+        h_in, src_mask, (hn, cn), h_bg = self.sq2sq_model.encode_sources(src, src_mask, bg, bg_mask, turn_ids=turn_ids)
+        h_in = torch.index_select(h_in, 0, indices).view(bs, -1, embed_d)
+        src_mask = torch.index_select(src_mask, 0, indices)
+        hn = torch.index_select(hn, 1, indices).view(bs, -1, embed_d)
+        cn = torch.index_select(cn, 1, indices).view(bs, -1, embed_d)
+        h_bg = torch.index_select(h_bg, 0, indices)
+        turn_ids = turn_ids[:, -1, :]
+
+        return {'h_in': h_in, 'src_mask': src_mask, 'hn': hn, 'cn': cn,
+                'h_bg': h_bg, 'turn_ids': turn_ids}
 
     def decoder(self, decoder_input, encoder_states, incr_state):
         hids = []
@@ -227,7 +238,7 @@ class InterviewerAgent(TorchGeneratorAgent):
 
     def diverged_dialogues_update(self, observation):
         """
-        This method update or harvest the diverged lineage history.
+        This method handle the output from teacher model with update and harvest the diverged lineage history.
         The first answer is the model output for the most recent teacher force history
         The rest items follwo the index of the lineages
         :param model_outputs: observation with 'model_answer'
@@ -246,6 +257,18 @@ class InterviewerAgent(TorchGeneratorAgent):
             else:
                 self.diverged_dialogues.lineages[i]._update_dialogues(text, reward=reward, cache=cache)
 
+    def self_observe_diverged_dialogue_update(self, self_message):
+        """
+        This method the diverged dialogue lineages with its QA model outputs
+        :param model_outputs: message object  with 'text', 'log_probs', and 'diverged_outputs'
+        :return: Update the diverged_dialogues object
+        """
+        self.diverged_dialogues.add_lineage(self_message["text"], self.history,
+                                            log_prob=self_message.get("log_probs", None))
+        model_outputs = self_message['diverged_outputs']
+        for i, (text, logprob) in enumerate(model_outputs):
+            lineage_index = i + 1
+            self.diverged_dialogues.lineages[lineage_index]._update_dialogues(text, log_prob=logprob)
 
 
     @classmethod
@@ -292,9 +315,9 @@ class InterviewerAgent(TorchGeneratorAgent):
             The message corresponding to the output from batch_act.
         """
         if self.rl_mode and self.exploration_steps > 0 and self_message["text"] and not self_message['episode_done']:
-            self.diverged_dialogues.add_lineage(self_message["text"], self.history, log_prob=self_message.get("log_probs", None))
+            self.self_observe_diverged_dialogue_update(self_message)
             self_message['diverged_dialogues'] = self.diverged_dialogues
-        super().self_observe(Message)
+        super().self_observe(self_message)
         self_message['history'] = self.history
 
     def _set_text_vec(self, obs, history, truncate, is_training=True):
@@ -313,6 +336,7 @@ class InterviewerAgent(TorchGeneratorAgent):
             features = util.generate_features(tokenized_data, vectorized_data, self.model.config['max_turns'])
             retval['text_vec'] = features
             retvals.append(retval)
+        #The master history lineage
         obs['text_vec'] = retvals[0]['text_vec']
         if len(retvals) > 1:
             obs['diverged_obs'] = retvals[1:]
@@ -349,17 +373,37 @@ class InterviewerAgent(TorchGeneratorAgent):
             valid = False
         return valid
 
-    def batchify(self, obs_batch, sort=False):
-        is_training = self.is_training
-        batch = Batch(batchsize=0, episode_done= obs_batch[0]['episode_done'])
-        if len(obs_batch) == 0:
+    def unpacking_obs_batcch_with_divergence(self, obs_batch):
+        new_obs_batch = []
+        index_batch_map = {}
+        index = 0
+        master_batch_size = 0
+        for batch_index, obs in enumerate(obs_batch):
+            master_batch_size += 1
+            master_id = str(batch_index) + "-0"
+            index_batch_map[index] = master_id
+            new_obs_batch.append(obs)
+            if 'diverged_obs' in obs and len(obs['diverged_obs']) > 0:
+                for div_index, div_obs in enumerate(obs['diverged_obs']):
+                    index += 1
+                    div_id = str(batch_index) + "-" + str(div_index+1)
+                    index_batch_map[index] = div_id
+                    new_obs_batch.append(div_obs)
+        return new_obs_batch, index_batch_map
+
+
+    def batchify(self, master_batch, sort=False):
+        batch = Batch(batchsize=0, episode_done= master_batch[0]['episode_done'])
+        if len(master_batch) == 0:
             return batch
-        # if self.rl_mode and self.exploration_steps > 0 and len(self.diverged_dialogues.lineages) >0:
-        #     ex = ex
-        valid_obs = [(i, ex) for i, ex in enumerate(obs_batch) if self.is_valid(ex)]
+        valid_obs = [(i, ex) for i, ex in enumerate(master_batch) if self.is_valid(ex)]
         if len(valid_obs) == 0:
             return batch
         valid_inds, exs = zip(*valid_obs)
+        if self.rl_mode and self.exploration_steps > 0 and len(self.diverged_dialogues.lineages) > 0:
+            obs_batch, index_batch_id_map = self.unpacking_obs_batcch_with_divergence(master_batch)
+        else:
+            obs_batch = master_batch
         src_text_numb = [len(obs['text_vec']['src_text']) for obs in obs_batch]
         retval = self._collate_fn(obs_batch)
 
@@ -367,8 +411,6 @@ class InterviewerAgent(TorchGeneratorAgent):
         src, tgt_in, tgt_out, turn_ids = \
             inputs['src'], inputs['tgt_in'], inputs['tgt_out'], inputs['turn_ids']
         bg = inputs.get('bg', None)
-        src_mask = src.eq(constants.PAD_ID)
-        bg_mask = bg.eq(constants.PAD_ID) if bg is not None else None
         batch = Batch(
             batchsize=len(valid_obs),
             valid_indices=valid_inds,
@@ -393,7 +435,7 @@ class InterviewerAgent(TorchGeneratorAgent):
             labels=inputs.get('tgt_text', None),
             text_lengths=src_text_numb,
             observations=obs_batch,
-            episode_end= obs_batch[0]['episode_done']
+            episode_end= obs_batch[0]['episode_done'],
         )
         return batch
 
@@ -474,7 +516,7 @@ class InterviewerAgent(TorchGeneratorAgent):
             # compute additional bleu scores
             self._compute_fairseq_bleu(batch, preds[0])
             self._compute_nltk_bleu(batch, text[0])
-        retval = Output(text, log_probs=scores)
+        retval = Output(text[:1], log_probs=scores[:1], diverged_outputs=[[(t, scores[i]) for i, t in enumerate(text[1:])]])
         return retval
 
     def reinforcement_backward_step(self, batch):

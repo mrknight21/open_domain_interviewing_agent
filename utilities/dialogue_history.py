@@ -80,9 +80,15 @@ class DialogueHistory(History):
             self.dialogues.append(dialogue)
 
     def get_cache(self, obs):
+        token_start_end = obs.get('token_start_end', None)
+        if not token_start_end:
+            character_start_end = obs.get('character_start_end', (-1, -1))
+            token_start_end = (-1, -1)
+        else:
+            character_start_end = (-1, -1)
         cache = {
-            'character_start_end': obs.get('character_start_end', None),
-            'token_start_end': obs.get('token_start_end', None),
+            'character_start_end':character_start_end,
+            'token_start_end': token_start_end,
             'yesno': obs['yesno'], 'followup': obs['followup']}
         return cache
 

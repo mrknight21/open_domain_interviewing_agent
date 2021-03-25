@@ -2,8 +2,7 @@
 import sys
 import os
 import torch
-from parlai.core.message import Message
-from parlai.core.torch_agent import Optional, Batch, Output
+from parlai.core.torch_agent import Batch, Output
 from parlai.core.metrics import AverageMetric
 from parlai_internal.agents.torch_span_agent.torch_span_agent import TorchSpanAgent, DialogueHistory
 from parlai_internal.utilities.flow_lstm_util.models.seq2seq import TeacherModel
@@ -209,8 +208,8 @@ class IntervieweeAgent(TorchSpanAgent):
                 cache = item
             item_yesno = cache.get('yesno')
             item_followup = cache.get('followup')
-            ans_st = -1
-            ans_en = -1
+            ans_st = cache.get('token_start_end', (-1, -1))[0]
+            ans_en = cache.get('token_start_end', (-1, -1))[1]
             char_st = cache.get('character_start_end')[0]
             char_en = cache.get('character_start_end')[1]
             ans = tokenized[1]
@@ -228,14 +227,18 @@ class IntervieweeAgent(TorchSpanAgent):
                 followup = constants.FOLLOWUP_TO_ID['f']
             else:
                 followup = constants.FOLLOWUP_TO_ID['m']
-            for idj, (st, en) in enumerate(ctx_offsets):
-                if en > char_st and ans_st < 0:
-                    ans_st = idj
-                if st >= char_en and ans_en < 0:
-                    ans_en = idj
-            if ans_en < 0:
-                ans_en = len(ctx_offsets)
-            assert ''.join(tokenized[1]) in ''.join(retval['context'][ans_st:ans_en]), '{} {}'.format(str(retval['context'][ans_st:ans_en]), str(tokenized[1]))
+            if ans_st == -1 and ans_en == -1:
+                for idj, (st, en) in enumerate(ctx_offsets):
+                    if en > char_st and ans_st < 0:
+                        ans_st = idj
+                    if st >= char_en and ans_en < 0:
+                        ans_en = idj
+                if ans_en < 0:
+                    ans_en = len(ctx_offsets)
+            try:
+                assert ''.join(tokenized[1]) in ''.join(retval['context'][ans_st:ans_en]), '{} {}'.format(str(retval['context'][ans_st:ans_en]), str(tokenized[1]))
+            except AssertionError as e:
+                print(e)
             retval['qas'].append({'question': tokenized[0], 'answer': ans,
             'start': ans_st, 'end': ans_en, 'yesno': yesno, 'followup': followup})
             tokenized = tokenized[2:]

@@ -134,7 +134,7 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
                 retval['single_label_text'] = original_question
                 retval['yesno'] = int(logits['yesno'][i].argmax())
                 retval['followup'] = int(logits['followup'][i].argmax())
-                retval['token_start_end'] = (int(logits['start'][i].argmax()), int(logits['end'][i].argmax()))
+                retval['token_start_end'] = (int(logits['start'][i].argmax()), int(logits['end'][i].argmax())+1)
                 retval['reward'] = reward
                 retval['reward_items'] = reward_items
         return retvals
