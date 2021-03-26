@@ -168,6 +168,8 @@ class Lineage(object):
             self.dialogues = []
         else:
             self.dialogues = copy.deepcopy(dialogues)
+        # indicate after which dialogue all dialogues are generated
+        self.gen_start_index = len(self.dialogues)
 
     def _update_dialogues(self, text, log_prob=None, reward=None, cache=None):
         """
@@ -181,6 +183,15 @@ class Lineage(object):
             self.dialogues[-1].update(text, log_prob=log_prob, reward=reward, cache=cache)
         else:
             self.dialogues.append(dialogue)
+
+    def get_conversation(self):
+        conversation = []
+        for turn in self.dialogues:
+            if turn.question:
+                conversation.append(turn.question)
+                if turn.answer:
+                    conversation.append(turn.answer)
+        return conversation
 
 class DialogueLineages(object):
 
