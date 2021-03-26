@@ -8,6 +8,18 @@ from .build import build
 import torch
 
 NO_ANSWER_REPLY = "CANNOTANSWER"
+SUPPORTED_REWARDS = {'reward_question', 'reward_you', 'reward_toxicity',
+                     'reward_bot_deepmoji', 'reward_user_deepmoji',
+                     'reward_conversation_repetition', 'reward_utterance_repetition',
+                     'reward_infersent_coherence', 'reward_deepmoji_coherence',
+                     'reward_word2vec_coherence', 'reward_bot_response_length',
+                     'reward_word_similarity', 'reward_USE_similarity'}
+DEFAULT_REWARD_LIST = {'reward_question', 'reward_you', 'reward_toxicity',
+                     'reward_bot_deepmoji', 'reward_user_deepmoji',
+                     'reward_conversation_repetition', 'reward_utterance_repetition',
+                     'reward_infersent_coherence', 'reward_deepmoji_coherence',
+                     'reward_word2vec_coherence', 'reward_bot_response_length',
+                     'reward_word_similarity', 'reward_USE_similarity'}
 
 
 def _path(opt):
@@ -76,6 +88,7 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         self.rl_mode = opt['reinforcement_learning']
         self.exploration_steps = opt['exploration_steps']
         self.use_cuda = not opt['no_cuda']
+        self.reward_list = opt.get('reward_list', )
         # now set up any fields that all instances may need
         self.EMPTY = torch.zeros(0, dtype=torch.long)
         self.NULL_IDX = self.dict[self.dict.null_token]
@@ -138,6 +151,31 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
                 retval['reward'] = reward
                 retval['reward_items'] = reward_items
         return retvals
+
+    def compute_rewards(self, conversations, rewards_lst, reward_weights, gamma=0.0):
+        supported = {'reward_question', 'reward_you', 'reward_toxicity',
+                     'reward_bot_deepmoji', 'reward_user_deepmoji',
+                     'reward_conversation_repetition', 'reward_utterance_repetition',
+                     'reward_infersent_coherence', 'reward_deepmoji_coherence',
+                     'reward_word2vec_coherence', 'reward_bot_response_length',
+                     'reward_word_similarity', 'reward_USE_similarity'}
+
+        episode_len = self.config.episode_len
+        num_convs = self.config.rl_batch_size
+        combined_rewards = np.zeros((num_convs, episode_len))
+
+        for r, w in zip(rewards_lst, reward_weights):
+            if r not in supported: raise NotImplementedError()
+            reward_func = getattr(hrl_rewards, r)
+            rewards = reward_func(conversations)
+            discounted = discount(rewards, gamma)
+            normalized = normalizeZ(discounted)
+            combined_rewards += float(w) * normalized
+
+            self.rewards_history[r].append(rewards.mean().item())
+
+        # [num_convs, num_actions] = [rl_batch_size, episode_len]
+        return to_var(torch.FloatTensor(combined_rewards))
 
     def get_reward(self, history):
         return 0
