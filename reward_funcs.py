@@ -59,9 +59,9 @@ def reward_you(conversations):
         rewards: numpy array of size [batch_size, episode_len]
     """
     num_convs = len(conversations)
-    episode_len = (len(conversations[0]) - 1) // 2
+    episode_len = len(conversations[0])
     # Flattened bot responses
-    bot_responses = [resp for conv in conversations for resp in conv[1::2]]
+    bot_responses = [turn.question for conv in conversations for turn in conv]
     rewards = np.array([resp.count('you') for resp in bot_responses])
     rewards = rewards.reshape(num_convs, episode_len)
     return rewards
@@ -72,12 +72,11 @@ def reward_conversation_repetition(conversations):
     previous conversation turn.
     """
     num_convs = len(conversations)
-    episode_len = (len(conversations[0]) - 1) // 2
+    episode_len = len(conversations[0])
     rewards = np.zeros((num_convs, episode_len))
-
     for i in range(num_convs):
         conv = conversations[i]
-        bot_responses = conv[1::2]
+        bot_responses = [turn.question for turn in conv]
         tokenized = [resp.split() for resp in bot_responses]
         filtered = [set(resp).difference(filters) for resp in tokenized]
 
@@ -95,12 +94,11 @@ def reward_utterance_repetition(conversations):
     """Allocates negative reward if a bot repeats in its current utterance.
     """
     num_convs = len(conversations)
-    episode_len = (len(conversations[0]) - 1) // 2
+    episode_len = len(conversations[0])
     rewards = np.zeros((num_convs, episode_len))
-
     for i in range(num_convs):
         conv = conversations[i]
-        bot_responses = conv[1::2]
+        bot_responses = [turn.question for turn in conv]
         tokenized = [resp.split() for resp in bot_responses]
         filtered = [[w for w in resp if w not in filters] for resp in tokenized]
 
@@ -116,9 +114,9 @@ def reward_bot_response_length(conversations):
     """Allocates reward for longer bot outputs/responses.
     """
     num_convs = len(conversations)
-    episode_len = (len(conversations[0]) - 1) // 2
+    episode_len = len(conversations[0])
     # Flattened bot responses
-    bot_responses = [resp for conv in conversations for resp in conv[1::2]]
+    bot_responses = [turn.question for conv in conversations for turn in conv]
 
     # Clean punctuation to avoid ? ? ? ? ? long responses
     punct_map = str.maketrans('', '', string.punctuation)
@@ -132,10 +130,10 @@ def reward_word_similarity(conversations):
     """Allocates reward when bot repeats word appearing in user utterance
     """
     num_convs = len(conversations)
-    episode_len = (len(conversations[0]) - 1) // 2
+    episode_len = len(conversations[0])
     # Flattened responses
-    bot_responses = [resp for conv in conversations for resp in conv[1::2]]
-    user_responses = [resp for conv in conversations for resp in conv[2::2]]
+    bot_responses = [turn.question for conv in conversations for turn in conv]
+    user_responses = [turn.answer for conv in conversations for turn in conv]
 
     user_tokenized = [sent.split() for sent in user_responses]
     bot_tokenized = [sent.split() for sent in bot_responses]
@@ -160,11 +158,11 @@ def reward_word_similarity(conversations):
 def reward_question(conversations):
     """Allocates reward for any bot utterance that asks questions."""
     num_convs = len(conversations)
-    episode_len = (len(conversations[0]) - 1) // 2
+    episode_len = len(conversations[0])
     rewards = np.zeros(num_convs * episode_len)
 
     # Flattened responses
-    bot_responses = [resp for conv in conversations for resp in conv[1::2]]
+    bot_responses = [turn.question for conv in conversations for turn in conv]
     question_words = ['who', 'what', 'why', 'where', 'how', 'when']
 
     for i, resp in enumerate(bot_responses):
