@@ -170,6 +170,7 @@ class Lineage(object):
             self.dialogues = copy.deepcopy(dialogues)
         # indicate after which dialogue all dialogues are generated
         self.gen_start_index = len(self.dialogues)
+        self.freeze = False
 
     def _update_dialogues(self, text, log_prob=None, reward=None, cache=None):
         """
@@ -223,9 +224,13 @@ class DialogueLineages(object):
             new_lineage._update_dialogues(text, log_prob=log_prob, reward=reward, cache=cache)
         self.lineages.appendleft(new_lineage)
 
-    def get_dialogues(self):
+    def get_dialogues(self, active_only=False):
         dialogues = []
         for l in self.lineages:
-            dialogues.append(l.dialogues)
+            if active_only:
+                if not l.freeze:
+                    dialogues.append(l.dialogues)
+            else:
+                dialogues.append(l.dialogues)
         return dialogues
 

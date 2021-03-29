@@ -4,22 +4,17 @@ from parlai_internal.agents.interviewee.interviewee import IntervieweeAgent
 from parlai.core.teachers import ParlAIDialogTeacher
 from parlai.utils.misc import warn_once
 from parlai_internal.utilities.flow_lstm_util import util
+from parlai_internal import reward_funcs
 from .build import build
 import torch
 
 NO_ANSWER_REPLY = "CANNOTANSWER"
-SUPPORTED_REWARDS = {'reward_question', 'reward_you', 'reward_toxicity',
-                     'reward_bot_deepmoji', 'reward_user_deepmoji',
+SUPPORTED_REWARDS = {'reward_question', 'reward_you',
                      'reward_conversation_repetition', 'reward_utterance_repetition',
-                     'reward_infersent_coherence', 'reward_deepmoji_coherence',
-                     'reward_word2vec_coherence', 'reward_bot_response_length',
-                     'reward_word_similarity', 'reward_USE_similarity'}
-DEFAULT_REWARD_LIST = {'reward_question', 'reward_you', 'reward_toxicity',
-                     'reward_bot_deepmoji', 'reward_user_deepmoji',
+                     'reward_bot_response_length', 'reward_word_similarity'}
+DEFAULT_REWARD_LIST = {'reward_question', 'reward_you',
                      'reward_conversation_repetition', 'reward_utterance_repetition',
-                     'reward_infersent_coherence', 'reward_deepmoji_coherence',
-                     'reward_word2vec_coherence', 'reward_bot_response_length',
-                     'reward_word_similarity', 'reward_USE_similarity'}
+                    'reward_bot_response_length','reward_word_similarity'}
 
 
 def _path(opt):
@@ -88,7 +83,8 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         self.rl_mode = opt['reinforcement_learning']
         self.exploration_steps = opt['exploration_steps']
         self.use_cuda = not opt['no_cuda']
-        self.reward_list = opt.get('reward_list', )
+        self.reward_list = opt.get('reward_list', DEFAULT_REWARD_LIST)
+        self.reward_weights = opt.get('reward_weights', [1/len(self.reward_list)]*len(self.reward_list))
         # now set up any fields that all instances may need
         self.EMPTY = torch.zeros(0, dtype=torch.long)
         self.NULL_IDX = self.dict[self.dict.null_token]
@@ -111,14 +107,35 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         model_answers = []
         if len(self.history.dialogues) > 0:
             histories_dialogues.append(self.history.dialogues)
-        if self.diverged_dialogues and len(self.diverged_dialogues) > 0:
-            histories_dialogues.extend(self.diverged_dialogues)
+        if self.diverged_dialogues and len(self.diverged_dialogues.lineages) > 0:
+            history_diverged_dialogues = self.diverged_dialogues.get_dialogues(active_only=True)
+            histories_dialogues.extend(history_diverged_dialogues)
         if histories_dialogues:
             model_answers = self.get_model_answer(histories_dialogues, action)
         if model_answers:
             action['model_answers'] = model_answers
+        if action['episode_done'] and model_answers:
+            rewards = self.get_reward(histories_dialogues, model_answers, action)
+            action['rewards'] = rewards
         return action
 
+    def compute_rewards(self, conversations, rewards_lst, reward_weights):
+        reward_items = {}
+        for r, w in zip(rewards_lst, reward_weights):
+            if r not in SUPPORTED_REWARDS: raise NotImplementedError()
+            reward_func = getattr(reward_funcs, r)
+            rewards = reward_func(conversations)
+            reward_items[r] = rewards
+
+    def get_reward(self, histories_dialogues, model_answers, action):
+        for i, d in enumerate(histories_dialogues):
+            d[-1].answer = model_answers[i]['text']
+        master = copy.copy(histories_dialogues[0][:-1])
+        master.append(copy.deepcopy(histories_dialogues[0][-1]))
+        master[-1].answer = action['text']
+        histories_dialogues.append(master)
+        reward_items = self.compute_rewards(histories_dialogues, self.reward_list, self.reward_weights)
+        return reward_items
 
     def get_model_answer(self, histories_dialogues, action):
         retvals = []
@@ -152,34 +169,6 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
                 retval['reward_items'] = reward_items
         return retvals
 
-    def compute_rewards(self, conversations, rewards_lst, reward_weights, gamma=0.0):
-        supported = {'reward_question', 'reward_you', 'reward_toxicity',
-                     'reward_bot_deepmoji', 'reward_user_deepmoji',
-                     'reward_conversation_repetition', 'reward_utterance_repetition',
-                     'reward_infersent_coherence', 'reward_deepmoji_coherence',
-                     'reward_word2vec_coherence', 'reward_bot_response_length',
-                     'reward_word_similarity', 'reward_USE_similarity'}
-
-        episode_len = self.config.episode_len
-        num_convs = self.config.rl_batch_size
-        combined_rewards = np.zeros((num_convs, episode_len))
-
-        for r, w in zip(rewards_lst, reward_weights):
-            if r not in supported: raise NotImplementedError()
-            reward_func = getattr(hrl_rewards, r)
-            rewards = reward_func(conversations)
-            discounted = discount(rewards, gamma)
-            normalized = normalizeZ(discounted)
-            combined_rewards += float(w) * normalized
-
-            self.rewards_history[r].append(rewards.mean().item())
-
-        # [num_convs, num_actions] = [rl_batch_size, episode_len]
-        return to_var(torch.FloatTensor(combined_rewards))
-
-    def get_reward(self, history):
-        return 0
-
     def trim_conversation_lineages(self):
         pass
 
@@ -191,6 +180,5 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         if 'history' in observation:
             self.history = observation['history']
         if 'diverged_dialogues' in observation:
-            diverged_dialogues = observation['diverged_dialogues']
-            self.diverged_dialogues = diverged_dialogues.get_dialogues()
+            self.diverged_dialogues = observation['diverged_dialogues']
         return observation

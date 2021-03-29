@@ -256,6 +256,10 @@ class InterviewerAgent(TorchGeneratorAgent):
                 self.diverged_dialogues.add_lineage(text, self.history, message=retval, reward=reward)
             else:
                 self.diverged_dialogues.lineages[i]._update_dialogues(text, reward=reward, cache=cache)
+        for lineage in self.diverged_dialogues.lineages:
+            if len(list(filter(lambda x: x.complete and x.generated, lineage.dialogues))) >= self.exploration_steps:
+                lineage.freeze = True
+
 
     def self_observe_diverged_dialogue_update(self, self_message):
         """
