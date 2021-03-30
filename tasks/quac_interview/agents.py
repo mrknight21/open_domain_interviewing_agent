@@ -158,6 +158,8 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
             tokenized_data = self.tokenize_from_history(obs, dialogues)
             vectorized_data = util.map_data(tokenized_data, self.dict)
             features = util.generate_features(tokenized_data, vectorized_data, self.model.args['max_turns'])
+            if 'token_start_end' not in action:
+                action['token_start_end'] = (tokenized_data['qas'][-1]['start'], tokenized_data['qas'][-1]['end'])
             obs['text_vec'] = features
             retvals.append(obs)
         # restore the ground truch question text

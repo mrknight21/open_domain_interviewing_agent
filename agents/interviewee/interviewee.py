@@ -235,10 +235,7 @@ class IntervieweeAgent(TorchSpanAgent):
                         ans_en = idj
                 if ans_en < 0:
                     ans_en = len(ctx_offsets)
-            try:
-                assert ''.join(tokenized[1]) in ''.join(retval['context'][ans_st:ans_en]), '{} {}'.format(str(retval['context'][ans_st:ans_en]), str(tokenized[1]))
-            except AssertionError as e:
-                print(e)
+            assert ''.join(tokenized[1]) in ''.join(retval['context'][ans_st:ans_en]), '{} {}'.format(str(retval['context'][ans_st:ans_en]), str(tokenized[1]))
             retval['qas'].append({'question': tokenized[0], 'answer': ans,
             'start': ans_st, 'end': ans_en, 'yesno': yesno, 'followup': followup})
             tokenized = tokenized[2:]
