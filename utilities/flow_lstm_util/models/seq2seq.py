@@ -897,5 +897,5 @@ class TeacherModel(nn.Module):
         pred_text = [" ".join(ctx_text[idx][s:e+1]) if not cm else ctx_text[idx][-1] for idx, (s, e, cm) in enumerate(zip(start_pos.cpu(), end_pos.cpu(), cannotanswer_pos.cpu()))]
         preds = {'logits': {'start': start_logits_pos, 'end': end_logits_pos,
                             'yesno': yesno_pos, 'followup': followup_pos},
-                 'outputs': pred_text}
+                 'outputs': pred_text, 'tokens_start_end':(start_pos, end_pos)}
         return loss, reward, reward_items, stats, preds
