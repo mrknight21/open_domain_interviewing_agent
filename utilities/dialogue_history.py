@@ -209,6 +209,11 @@ class DialogueLineages(object):
             'yesno': obs['yesno'], 'followup': obs['followup']}
         return cache
 
+    def get_lineages_count(self, active_only=False):
+        if active_only:
+            return len([l for l in self.lineages if not l.freeze])
+        return len(self.lineages)
+
     def add_lineage(self, text, history, message=None, log_prob=None, reward=None, cache=None):
         new_lineage = Lineage(history.dialogues)
         if message:

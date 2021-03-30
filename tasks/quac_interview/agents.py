@@ -115,27 +115,36 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         if model_answers:
             action['model_answers'] = model_answers
         if action['episode_done'] and model_answers:
+            histories_dialogues = [self.history.dialogues] + self.diverged_dialogues.get_dialogues()
             rewards = self.get_reward(histories_dialogues, model_answers, action)
             action['rewards'] = rewards
         return action
 
-    def compute_rewards(self, conversations, rewards_lst, reward_weights):
+    def get_reward(self, histories_dialogues, model_answers, action):
+        rewards = {'master':None, 'diverged': None}
+        for i, m_ans in enumerate(model_answers):
+            histories_dialogues[i][-1].answer = m_ans['text']
+        master_reward, diverged_rewards = self.compute_reward(histories_dialogues, last_action=action)
+        rewards['master'] = master_reward
+        rewards['diverged'] = diverged_rewards
+        return rewards
+
+    def compute_rewards(self, conversations, last_action):
+        master_conv = self.get_master_dialogue(conversations[0], last_action['text'])
         reward_items = {}
-        for r, w in zip(rewards_lst, reward_weights):
+        for r, w in zip(self.rewards_lst, self.reward_weights):
             if r not in SUPPORTED_REWARDS: raise NotImplementedError()
             reward_func = getattr(reward_funcs, r)
-            rewards = reward_func(conversations)
+            rewards = reward_func(conversations, master_conv)
             reward_items[r] = rewards
 
-    def get_reward(self, histories_dialogues, model_answers, action):
-        for i, d in enumerate(histories_dialogues):
-            d[-1].answer = model_answers[i]['text']
-        master = copy.copy(histories_dialogues[0][:-1])
-        master.append(copy.deepcopy(histories_dialogues[0][-1]))
-        master[-1].answer = action['text']
-        histories_dialogues.append(master)
-        reward_items = self.compute_rewards(histories_dialogues, self.reward_list, self.reward_weights)
-        return reward_items
+    def get_master_dialogue(self, lastest_diverged, last_response):
+        master = copy.copy(lastest_diverged[:-1])
+        last_turn = copy.deepcopy(lastest_diverged[-1])
+        last_turn.answer = last_response
+        master.append(last_turn)
+        return master
+
 
     def get_model_answer(self, histories_dialogues, action):
         retvals = []
@@ -160,11 +169,13 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
             logits, outputs = preds['logits'], preds['outputs']
             # update each retval with the output answers and also swap the question and text key
             for i, retval in enumerate(retvals):
+                token_start = int(preds['tokens_start_end'][0][i].data)
+                token_end = int(preds['tokens_start_end'][1][i].data)
                 retval['text'] = outputs[i]
                 retval['single_label_text'] = original_question
                 retval['yesno'] = int(logits['yesno'][i].argmax())
                 retval['followup'] = int(logits['followup'][i].argmax())
-                retval['token_start_end'] = (int(logits['start'][i].argmax()), int(logits['end'][i].argmax())+1)
+                retval['token_start_end'] = (token_start, token_end+1)
                 retval['reward'] = reward
                 retval['reward_items'] = reward_items
         return retvals

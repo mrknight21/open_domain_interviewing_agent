@@ -257,8 +257,10 @@ class InterviewerAgent(TorchGeneratorAgent):
             else:
                 self.diverged_dialogues.lineages[i]._update_dialogues(text, reward=reward, cache=cache)
         for lineage in self.diverged_dialogues.lineages:
-            if len(list(filter(lambda x: x.complete and x.generated, lineage.dialogues))) >= self.exploration_steps:
-                lineage.freeze = True
+            if not lineage.freeze:
+                # freeze lineage that reach the exploration limits
+                if len(list(filter(lambda x: x.complete and x.generated, lineage.dialogues))) >= self.exploration_steps:
+                    lineage.freeze = True
 
 
     def self_observe_diverged_dialogue_update(self, self_message):
@@ -330,7 +332,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         # original_question = obs['single_label_text']
         retvals = []
         if len(self.diverged_dialogues.lineages) > 0:
-            history_dialogues += [lineage.dialogues for lineage in self.diverged_dialogues.lineages]
+            history_dialogues += [lineage.dialogues for lineage in self.diverged_dialogues.lineages if not lineage.freeze]
         for dialogues in history_dialogues:
             retval = copy.copy(obs)
             if dialogues:
@@ -534,12 +536,9 @@ class InterviewerAgent(TorchGeneratorAgent):
         qas = []
         if len(dialogues) > 0:
             for turn in dialogues:
-                try:
-                    strings_to_tokenize.append(turn.question)
-                    strings_to_tokenize.append(turn.answer)
-                    qas.append((turn.question, turn.answer))
-                except AttributeError as e:
-                    print(e)
+                strings_to_tokenize.append(turn.question)
+                strings_to_tokenize.append(turn.answer)
+                qas.append((turn.question, turn.answer))
         strings_to_tokenize.append(item['single_label_text'])
         strings_to_tokenize.append(item['text'])
         qas.append((item['single_label_text'], ""))
