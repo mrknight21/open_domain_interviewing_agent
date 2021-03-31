@@ -11,10 +11,10 @@ import torch
 NO_ANSWER_REPLY = "CANNOTANSWER"
 SUPPORTED_REWARDS = {'reward_question', 'reward_you',
                      'reward_conversation_repetition', 'reward_utterance_repetition',
-                     'reward_bot_response_length', 'reward_word_similarity'}
+                     'reward_bot_response_length', 'reward_simple_coverage'}
 DEFAULT_REWARD_LIST = {'reward_question', 'reward_you',
                      'reward_conversation_repetition', 'reward_utterance_repetition',
-                    'reward_bot_response_length','reward_word_similarity'}
+                    'reward_bot_response_length', 'reward_simple_coverage'}
 
 
 def _path(opt):
@@ -83,8 +83,8 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         self.rl_mode = opt['reinforcement_learning']
         self.exploration_steps = opt['exploration_steps']
         self.use_cuda = not opt['no_cuda']
-        self.reward_list = opt.get('reward_list', DEFAULT_REWARD_LIST)
-        self.reward_weights = opt.get('reward_weights', [1/len(self.reward_list)]*len(self.reward_list))
+        self.rewards_list = opt.get('rewards_list', DEFAULT_REWARD_LIST)
+        self.rewards_weights = opt.get('rewards_weights', [1/len(self.rewards_list)]*len(self.rewards_list))
         # now set up any fields that all instances may need
         self.EMPTY = torch.zeros(0, dtype=torch.long)
         self.NULL_IDX = self.dict[self.dict.null_token]
@@ -115,28 +115,30 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         if model_answers:
             action['model_answers'] = model_answers
         if action['episode_done'] and model_answers:
-            histories_dialogues = [self.history.dialogues] + self.diverged_dialogues.get_dialogues()
-            rewards = self.get_reward(histories_dialogues, model_answers, action)
+            rewards = self.get_reward(model_answers, action)
             action['rewards'] = rewards
         return action
 
-    def get_reward(self, histories_dialogues, model_answers, action):
+    def get_reward(self, model_answers, action):
+        histories_dialogues = [self.history.dialogues] + self.diverged_dialogues.get_dialogues()
         rewards = {'master':None, 'diverged': None}
         for i, m_ans in enumerate(model_answers):
             histories_dialogues[i][-1].answer = m_ans['text']
-        master_reward, diverged_rewards = self.compute_reward(histories_dialogues, last_action=action)
+            histories_dialogues[i][-1].cache = self.history.get_cache(m_ans)
+        master_reward, diverged_rewards = self.compute_rewards(histories_dialogues, last_action=action)
         rewards['master'] = master_reward
         rewards['diverged'] = diverged_rewards
         return rewards
 
     def compute_rewards(self, conversations, last_action):
-        reward_items = {}
-        for r, w in zip(self.rewards_lst, self.reward_weights):
+        master_rewards = {}
+        diverged_rewards = {}
+        for r, w in zip(self.rewards_list, self.rewards_weights):
             if r not in SUPPORTED_REWARDS: raise NotImplementedError()
             reward_func = getattr(reward_funcs, r)
-            rewards = reward_func(conversations, self.history, last_text=last_action['text'],
+            master_rewards[r], diverged_rewards[r] = reward_func(conversations, self.history, last_action=last_action,
                                   agent_dictionary=self.dict)
-            reward_items[r] = rewards
+        return master_rewards, diverged_rewards
 
     def get_master_dialogue(self, lastest_diverged, last_response):
         master = copy.copy(lastest_diverged[:-1])

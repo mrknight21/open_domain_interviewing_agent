@@ -200,6 +200,12 @@ class InterviewerAgent(TorchGeneratorAgent):
             default=0,
             help='maximum number of deviation turns allowed for history',
         )
+        parser.add_argument(
+            '--reinforcement-learning',
+            type='bool',
+            default=False,
+            help='train with reinforcement learning',
+        )
 
     def __init__(self, opt: Opt, shared=None):
         self.rl_mode = opt['reinforcement_learning']
@@ -250,7 +256,6 @@ class InterviewerAgent(TorchGeneratorAgent):
         for i, retval in enumerate(model_output):
             text = retval['text']
             reward = retval['reward']
-            reward_items = retval['reward_items']
             cache = self.diverged_dialogues.get_cache(retval)
             if i == 0:
                 self.diverged_dialogues.add_lineage(text, self.history, message=retval, reward=reward)
@@ -490,7 +495,6 @@ class InterviewerAgent(TorchGeneratorAgent):
         """
         Train on a single batch of examples.
         """
-        output = None
         if batch.batchsize <=0 and batch.episode_done:
             if self.rl_mode:
                 self.reinforcement_backward_step()
@@ -526,6 +530,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         return retval
 
     def reinforcement_backward_step(self, batch):
+        # TODO COmplete the loss function for reinforcement learning
         return
 
     def tokenize_from_history(self, item, dialogues=None):
