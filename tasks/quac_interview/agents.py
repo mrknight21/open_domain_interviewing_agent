@@ -121,24 +121,23 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
 
     def get_reward(self, model_answers, action):
         histories_dialogues = [self.history.dialogues] + self.diverged_dialogues.get_dialogues()
-        rewards = {'master':None, 'diverged': None}
         for i, m_ans in enumerate(model_answers):
             histories_dialogues[i][-1].answer = m_ans['text']
             histories_dialogues[i][-1].cache = self.history.get_cache(m_ans)
-        master_reward, diverged_rewards = self.compute_rewards(histories_dialogues, last_action=action)
-        rewards['master'] = master_reward
-        rewards['diverged'] = diverged_rewards
+        rewards = self.compute_rewards(histories_dialogues, last_action=action)
         return rewards
 
     def compute_rewards(self, conversations, last_action):
-        master_rewards = {}
-        diverged_rewards = {}
+        rewards = {}
         for r, w in zip(self.rewards_list, self.rewards_weights):
+            rewards[r] = {"master": None, "diverged_rewards": None, "weight": w}
             if r not in SUPPORTED_REWARDS: raise NotImplementedError()
             reward_func = getattr(reward_funcs, r)
-            master_rewards[r], diverged_rewards[r] = reward_func(conversations, self.history, last_action=last_action,
-                                  agent_dictionary=self.dict)
-        return master_rewards, diverged_rewards
+            master_rewards, diverged_rewards = reward_func(conversations, self.history, last_action=last_action,
+                                                           agent_dictionary=self.dict)
+            rewards[r]["master"] = master_rewards
+            rewards[r]["diverged_rewards"] = diverged_rewards
+        return rewards
 
     def get_master_dialogue(self, lastest_diverged, last_response):
         master = copy.copy(lastest_diverged[:-1])
