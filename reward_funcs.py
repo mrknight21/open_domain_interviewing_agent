@@ -45,10 +45,13 @@ def discount(rewards, gamma=0.9):
 def cosine_similarity(a, b):
     return np.sum(a * b, axis=1) / np.sqrt((np.sum(a * a, axis=1) * np.sum(b * b, axis=1)))
 
-def reward_utterance_repetition(conversations, master_conv=None):
+def reward_utterance_repetition(conversations, master_history=None, last_text=None, agent_dictionary=None):
     """Allocates negative reward if a bot repeats in its current utterance.
     """
-    if master_conv:
+    master_conv = None
+    if master_history and last_text:
+        master_conv = master_history.dialogues
+        master_conv[-1].answer = last_text
         conversations = [master_conv] + conversations
     num_convs = len(conversations)
     diverged_rewards = []
@@ -80,7 +83,7 @@ def reward_utterance_repetition(conversations, master_conv=None):
     else:
         return diverged_rewards
 
-def reward_you(conversations, master_conv=None):
+def reward_you(conversations, master_history=None, last_text=None, agent_dictionary=None):
     """Allocates reward for any sentence that contains the reward 'you'. Used
     for debugging
 
@@ -90,7 +93,10 @@ def reward_you(conversations, master_conv=None):
     Returns:
         rewards: numpy array of size [batch_size, episode_len]
     """
-    if master_conv:
+    master_conv = None
+    if master_history and last_text:
+        master_conv = master_history.dialogues
+        master_conv[-1].answer = last_text
         conversations = [master_conv] + conversations
     num_convs = len(conversations)
     diverged_rewards = []
@@ -114,11 +120,14 @@ def reward_you(conversations, master_conv=None):
         return diverged_rewards
 
 
-def reward_conversation_repetition(conversations, master_conv=None):
+def reward_conversation_repetition(conversations, master_history=None, last_text=None, agent_dictionary=None):
     """Allocates negative reward if the bot repeats a word it has said in a
     previous conversation turn.
     """
-    if master_conv:
+    master_conv = None
+    if master_history and last_text:
+        master_conv = master_history.dialogues
+        master_conv[-1].answer = last_text
         conversations = [master_conv] + conversations
     num_convs = len(conversations)
     diverged_rewards = []
@@ -152,11 +161,57 @@ def reward_conversation_repetition(conversations, master_conv=None):
     else:
         return diverged_rewards
 
+def reward_simple_coverage(conversations, master_history=None, last_text=None, agent_dictionary=None):
+    """Allocates negative reward if the bot repeats a word it has said in a
+    previous conversation turn.
+    """
+    master_conv = None
+    if master_history and last_text:
+        master_conv = master_history.dialogues
+        master_conv[-1].answer = last_text
+        conversations = [master_conv] + conversations
+    num_convs = len(conversations)
+    context = master_history.context
+    tokenized = master_history
+    diverged_rewards = []
+    master_rewards = None
+    master_cache = {}
+    for i in range(num_convs):
+        dialogue_reward = []
+        conv = conversations[i]
+        episode_num = len(conv)
+        if master_cache:
+            bot_responses = [turn.question for turn in conv if turn.generated]
+        else:
+            bot_responses = [turn.question for turn in conv]
+        tokenized = [resp.split() for resp in bot_responses]
+        filtered = [[w for w in resp if w not in filters] for resp in tokenized]
+        filtered = master_cache['filtered'][:episode_num-len(bot_responses)] + filtered
+        for j in len(conv):
+            if master_rewards and not conv[j].generated:
+                dialogue_reward.append(master_rewards[j])
+            else:
+                current = filtered[j]
+                prev = set.union(*filtered[:j])
+                repeats = current.intersection(prev)
+                dialogue_reward.append(len(repeats))
+        if master_conv and i ==0:
+            master_rewards = dialogue_reward
+        else:
+            diverged_rewards.append(dialogue_reward)
+    if master_conv:
+        return master_rewards, diverged_rewards
+    else:
+        return diverged_rewards
 
-def reward_bot_response_length(conversations, master_conv=None):
+
+def reward_bot_response_length(conversations, master_history=None, last_text=None, agent_dictionary=None):
     """Allocates reward for longer bot outputs/responses.
     """
-    if master_conv:
+    master_conv = None
+    if master_history and last_text:
+        master_conv = master_history.dialogues
+        master_conv[-1].answer = last_text
         conversations = [master_conv] + conversations
     rewards = []
     # Flattened bot responses
@@ -176,10 +231,13 @@ def reward_bot_response_length(conversations, master_conv=None):
     else:
         return rewards
 
-def reward_question(conversations, master_conv=None):
+def reward_question(conversations, master_history=None, last_text=None, agent_dictionary=None):
     """Allocates reward for any bot utterance that asks questions."""
     question_words = ['who', 'what', 'why', 'where', 'how', 'when']
-    if master_conv:
+    master_conv = None
+    if master_history and last_text:
+        master_conv = master_history.dialogues
+        master_conv[-1].answer = last_text
         conversations = [master_conv] + conversations
     num_convs = len(conversations)
     diverged_rewards = []
@@ -205,33 +263,6 @@ def reward_question(conversations, master_conv=None):
     else:
         return diverged_rewards
 
-# def reward_word_similarity(conversations):
-#     """Allocates reward when bot repeats word appearing in user utterance
-#     """
-#     num_convs = len(conversations)
-#     episode_len = len(conversations[0])
-#     # Flattened responses
-#     bot_responses = [turn.question for conv in conversations for turn in conv]
-#     user_responses = [turn.answer for conv in conversations for turn in conv]
-#
-#     user_tokenized = [sent.split() for sent in user_responses]
-#     bot_tokenized = [sent.split() for sent in bot_responses]
-#
-#     # Don't reward for repeating stopwords, question words, or <unknown>
-#     filter = set.union(filters, question_words, {'<unk>'})
-#     bot_filtered = [set(resp).difference(filter)
-#                     for resp in bot_tokenized]
-#
-#     rewards = np.zeros(num_convs * episode_len)
-#     for i in range(num_convs * episode_len):
-#         in_common = [w for w in bot_filtered[i] if w in user_tokenized[i]]
-#
-#         # Normalize by response len to prevent spamming response
-#         if len(bot_tokenized[i]):
-#             rewards[i] = len(in_common) / len(bot_tokenized[i])
-#
-#     rewards = rewards.reshape(num_convs, episode_len)
-#     return rewards
 
 
 

@@ -6,6 +6,7 @@ import parlai.utils.logging as logging
 from parlai.core.dict import DictionaryAgent
 from parlai.core.opt import Opt
 from parlai_internal.utilities.flow_lstm_util import constants
+import numpy as np
 
 
 class InterviewDictionaryAgent(DictionaryAgent):
@@ -61,6 +62,7 @@ class InterviewDictionaryAgent(DictionaryAgent):
         self.end_token = constants.EOS
         self.start_token = constants.SOS
         self.sep_token = constants.SEP
+        self._unk_token_idx = self.unk_token
 
     def override_special_tokens(self, opt):
         # Note that contants.SEP does not exist in the original teacher model.
@@ -70,6 +72,7 @@ class InterviewDictionaryAgent(DictionaryAgent):
         self._define_special_tokens(opt)
         # now override
         self.unk_idx = constants.UNK_ID
+        self._unk_token_idx = self.unk_idx
         self.pad_idx = constants.PAD_ID
         self.null_idx = constants.PAD_ID
         self.end_idx = constants.EOS_ID

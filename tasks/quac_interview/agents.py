@@ -130,12 +130,12 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         return rewards
 
     def compute_rewards(self, conversations, last_action):
-        master_conv = self.get_master_dialogue(conversations[0], last_action['text'])
         reward_items = {}
         for r, w in zip(self.rewards_lst, self.reward_weights):
             if r not in SUPPORTED_REWARDS: raise NotImplementedError()
             reward_func = getattr(reward_funcs, r)
-            rewards = reward_func(conversations, master_conv)
+            rewards = reward_func(conversations, self.history, last_text=last_action['text'],
+                                  agent_dictionary=self.dict)
             reward_items[r] = rewards
 
     def get_master_dialogue(self, lastest_diverged, last_response):
@@ -181,9 +181,6 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
                 retval['reward'] = reward
                 retval['reward_items'] = reward_items
         return retvals
-
-    def trim_conversation_lineages(self):
-        pass
 
     def observe(self, observation):
         """
