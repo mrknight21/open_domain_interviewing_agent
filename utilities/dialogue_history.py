@@ -49,6 +49,7 @@ class DialogueHistory(History):
         self.title = None
         self.background = None
         self.section_title = None
+        self.rewards = None
 
     def reset(self):
         """
@@ -62,6 +63,7 @@ class DialogueHistory(History):
         self.title = None
         self.background = None
         self.section_title = None
+        self.rewards = None
 
     def _update_dialogues(self, text, log_prob=None, reward=None, cache=None):
         """
@@ -238,4 +240,12 @@ class DialogueLineages(object):
             else:
                 dialogues.append(l.dialogues)
         return dialogues
+
+    def get_log_probs(self):
+        generated_log_probs = []
+        for l in self.lineages:
+            dialogue_length = len(l.dialogues)
+            log_probs = [d.log_prob for d in l.dialogues if d.generated]
+            generated_log_probs.append({'dialogue_length': dialogue_length, 'log_probs':log_probs})
+        return generated_log_probs
 

@@ -12,9 +12,7 @@ NO_ANSWER_REPLY = "CANNOTANSWER"
 SUPPORTED_REWARDS = {'reward_question', 'reward_you',
                      'reward_conversation_repetition', 'reward_utterance_repetition',
                      'reward_bot_response_length', 'reward_simple_coverage'}
-DEFAULT_REWARD_LIST = {'reward_question', 'reward_you',
-                     'reward_conversation_repetition', 'reward_utterance_repetition',
-                    'reward_bot_response_length', 'reward_simple_coverage'}
+DEFAULT_REWARD_LIST = {'reward_simple_coverage'}
 
 
 def _path(opt):
@@ -149,7 +147,6 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
 
     def get_model_answer(self, histories_dialogues, action):
         retvals = []
-        outputs = None
         original_answer = action['text']
         original_question = action['single_label_text']
         for dialogues in histories_dialogues:
@@ -168,7 +165,8 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         action['single_label_text'] = original_question
         if retvals:
             batch = self.batchify(retvals)
-            _, reward, reward_items, _, preds = self.model(**self._model_input(batch))
+            with torch.no_grad():
+                _, reward, reward_items, _, preds = self.model(**self._model_input(batch))
             logits, outputs = preds['logits'], preds['outputs']
             # update each retval with the output answers and also swap the question and text key
             for i, retval in enumerate(retvals):
