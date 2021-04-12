@@ -201,8 +201,11 @@ def reward_simple_coverage(conversations, master_history=None, last_action=None,
                     prev_coverage = set()
                 else:
                     prev_coverage = set.union(*interviewer_coverage[:j])
-                new_capture_count = len(interviewer_coverage[j].difference(prev_coverage))
-                dialogue_reward.append(new_capture_count/total_toks)
+                if conv[j].answer == "CANNOTANSWER":
+                    dialogue_reward.append(0)
+                else:
+                    new_capture_count = len(interviewer_coverage[j].difference(prev_coverage))
+                    dialogue_reward.append(new_capture_count/total_toks)
         if master_conv and i==0:
             master_rewards = dialogue_reward
             master_cache['coverages'] = interviewer_coverage
