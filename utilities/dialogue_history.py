@@ -13,8 +13,9 @@ class DialogueTurn(object):
     complete: bool
     generated: bool
 
-    def __init__(self, question_text, answer_text=None, log_prob=None, reward=None, cache=None):
+    def __init__(self, question_text, answer_text=None, log_prob=None, reward=None, cache=None, ques_len=0):
         self.question = question_text
+        self.ques_len = ques_len
         self.answer = answer_text
         self.log_prob = log_prob
         self.reward = reward
@@ -27,7 +28,7 @@ class DialogueTurn(object):
             self.complete = True
 
 
-    def update(self, answer_text=None, log_prob=None, reward=None, cache=None):
+    def update(self, answer_text=None, log_prob=None, reward=None, cache=None, ques_len=0):
         if answer_text:
             self.answer = answer_text
             self.complete = True
@@ -38,6 +39,8 @@ class DialogueTurn(object):
             self.reward = reward
         if cache is not None:
             self.cache = cache
+        if ques_len:
+            self.ques_len = ques_len
 
 
 class DialogueHistory(History):
@@ -65,7 +68,7 @@ class DialogueHistory(History):
         self.section_title = None
         self.rewards = None
 
-    def _update_dialogues(self, text, log_prob=None, reward=None, cache=None):
+    def _update_dialogues(self, text, log_prob=None, reward=None, cache=None, ques_len=0):
         """
         Update the history dialogue with te given observation.
         dialogue is a tuple with index 0 from the others and the index 1 from self
@@ -75,9 +78,9 @@ class DialogueHistory(History):
         if self.size > 0:
             while len(self.dialogues) >= self.size/2:
                 self.dialogues.pop(0)
-        dialogue = DialogueTurn(question_text=text, log_prob=log_prob, reward=reward, cache=cache)
+        dialogue = DialogueTurn(question_text=text, log_prob=log_prob, reward=reward, cache=cache, ques_len=ques_len)
         if self.dialogues and not self.dialogues[-1].complete:
-            self.dialogues[-1].update(text, log_prob=log_prob, reward=reward, cache=cache)
+            self.dialogues[-1].update(text, log_prob=log_prob, reward=reward, cache=cache, ques_len=ques_len)
         else:
             self.dialogues.append(dialogue)
 
@@ -108,7 +111,7 @@ class DialogueHistory(History):
         """
         if "text" in obs and obs["text"] is not None:
             log_prob = obs.get('log_prob', None)
-            reward = obs.get('reward', None)
+            # reward = obs.get('reward', None)
             text = obs['text']
             cache = self.get_cache(obs)
             if not self.context and obs.get('context', None):
@@ -127,7 +130,7 @@ class DialogueHistory(History):
             # update history string
             self._update_strings(text)
             # update history dialogues
-            self._update_dialogues(text, log_prob=log_prob, reward=reward, cache=cache)
+            self._update_dialogues(text, log_prob=log_prob, cache=cache)
             # update history vecs
             self._update_vecs(text)
         self.temp_history = temp_history
@@ -174,16 +177,16 @@ class Lineage(object):
         self.gen_start_index = len(self.dialogues)
         self.freeze = False
 
-    def _update_dialogues(self, text, log_prob=None, reward=None, cache=None):
+    def _update_dialogues(self, text, log_prob=None, reward=None, cache=None, ques_len=0):
         """
         Update the history dialogue with te given observation.
         dialogue is a tuple with index 0 from the others and the index 1 from self
         :param text: the current observed utterance text
         """
 
-        dialogue = DialogueTurn(question_text=text, log_prob=log_prob, reward=reward, cache=cache)
+        dialogue = DialogueTurn(question_text=text, log_prob=log_prob, reward=reward, cache=cache, ques_len=ques_len)
         if self.dialogues and not self.dialogues[-1].complete:
-            self.dialogues[-1].update(text, log_prob=log_prob, reward=reward, cache=cache)
+            self.dialogues[-1].update(text, log_prob=log_prob, reward=reward, cache=cache, ques_len=ques_len)
         else:
             self.dialogues.append(dialogue)
 
@@ -202,6 +205,11 @@ class DialogueLineages(object):
         self.lineages = deque()
 
     def reset(self):
+        for l in self.lineages:
+            for d in l.dialogues:
+                if d.generated:
+                    del d.log_prob
+        del self.lineages
         self.lineages = deque()
 
     def get_cache(self, obs):
@@ -216,7 +224,7 @@ class DialogueLineages(object):
             return len([l for l in self.lineages if not l.freeze])
         return len(self.lineages)
 
-    def add_lineage(self, text, history, message=None, log_prob=None, reward=None, cache=None):
+    def add_lineage(self, text, history, message=None, log_prob=None, reward=None, cache=None, ques_len=0):
         new_lineage = Lineage(history.dialogues)
         if message:
             # create new lineage from ground truth answer
@@ -225,10 +233,7 @@ class DialogueLineages(object):
             log_prob = message.get('log_prob', None)
             reward = message.get('reward', None)
             text = message.get('text', "")
-            new_lineage._update_dialogues(text, log_prob=log_prob, reward=reward, cache=cache)
-        else:
-            # create new lineage from ground truth question
-            new_lineage._update_dialogues(text, log_prob=log_prob, reward=reward, cache=cache)
+        new_lineage._update_dialogues(text, log_prob=log_prob, reward=reward, cache=cache, ques_len=ques_len)
         self.lineages.appendleft(new_lineage)
 
     def get_dialogues(self, active_only=False):
@@ -245,7 +250,8 @@ class DialogueLineages(object):
         generated_log_probs = []
         for l in self.lineages:
             dialogue_length = len(l.dialogues)
+            ques_len = [d.ques_len for d in l.dialogues if d.generated]
             log_probs = [d.log_prob for d in l.dialogues if d.generated]
-            generated_log_probs.append({'dialogue_length': dialogue_length, 'log_probs':log_probs})
+            generated_log_probs.append({'dialogue_length': dialogue_length, 'log_probs':log_probs, 'ques_len':ques_len})
         return generated_log_probs
 

@@ -12,7 +12,7 @@ NO_ANSWER_REPLY = "CANNOTANSWER"
 SUPPORTED_REWARDS = {'reward_question', 'reward_you',
                      'reward_conversation_repetition', 'reward_utterance_repetition',
                      'reward_bot_response_length', 'reward_simple_coverage'}
-DEFAULT_REWARD_LIST = {'reward_simple_coverage'}
+DEFAULT_REWARD_LIST = {'reward_simple_coverage', 'reward_conversation_repetition', 'reward_bot_response_length'}
 
 
 def _path(opt):
@@ -166,7 +166,7 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         if retvals:
             batch = self.batchify(retvals)
             with torch.no_grad():
-                _, reward, reward_items, _, preds = self.model(**self._model_input(batch))
+                _, reward, _, _, preds = self.model(**self._model_input(batch))
             logits, outputs = preds['logits'], preds['outputs']
             # update each retval with the output answers and also swap the question and text key
             for i, retval in enumerate(retvals):
@@ -177,8 +177,8 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
                 retval['yesno'] = int(logits['yesno'][i].argmax())
                 retval['followup'] = int(logits['followup'][i].argmax())
                 retval['token_start_end'] = (token_start, token_end+1)
-                retval['reward'] = reward
-                retval['reward_items'] = reward_items
+                # retval['reward'] = reward.data
+                # retval['reward_items'] = reward_items
         return retvals
 
     def observe(self, observation):

@@ -237,10 +237,7 @@ class Seq2SeqModel(nn.Module):
         """ Decode a step, based on context encoding and source context states."""
         decoder = self.decoder if decoder is None else decoder
         dec_hidden = (hn, cn)
-        try:
-            h_out, dec_hidden, attn = decoder(dec_inputs, dec_hidden, ctx, ctx_mask, turn_ids=turn_ids, pair_level_output=pair_level_output, previous_output=previous_output, h_bg=h_bg)
-        except RuntimeError as e:
-            pass
+        h_out, dec_hidden, attn = decoder(dec_inputs, dec_hidden, ctx, ctx_mask, turn_ids=turn_ids, pair_level_output=pair_level_output, previous_output=previous_output, h_bg=h_bg)
         h_out_reshape = h_out.contiguous().view(h_out.size(0) * h_out.size(1), -1)
         decoder_logits = self.dec2vocab(self.drop(h_out_reshape))
         decoder_logits = decoder_logits.view(h_out.size(0), h_out.size(1), -1)
