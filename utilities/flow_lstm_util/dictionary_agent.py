@@ -119,3 +119,6 @@ class InterviewDictionaryAgent(DictionaryAgent):
         else:
             text = delimiter.join(self[int(idx)] for idx in vector)
         return text
+
+    def save(self, filename=None, append=False, sort=True):
+        return

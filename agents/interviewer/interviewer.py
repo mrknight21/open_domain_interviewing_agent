@@ -95,9 +95,7 @@ class Sq2SqQuestionGenerationModel(TorchGeneratorModel):
         return log_probs, incr_state
 
     def load_question_generation_model(self, opt, dict):
-        filename = opt['init_model']
-        if not filename:
-            filename = os.path.join(opt['datapath'], constants.FINE_TUNE_FILE)
+        filename = os.path.join(opt['datapath'], constants.FINE_TUNE_FILE)
         print(f"Loading model from '{filename}'...")
         checkpoint = torch.load(filename, lambda storage, loc: storage)
         args = checkpoint['config']
