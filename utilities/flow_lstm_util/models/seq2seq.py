@@ -289,7 +289,10 @@ class Seq2SeqModel(nn.Module):
         h_in2 = h_in2.unsqueeze(1).expand(B, T, h_in2.size(1), h_in2.size(2)).contiguous().view(B*T, h_in2.size(1), h_in2.size(2))
         bg_mask = bg_mask.unsqueeze(1).expand(B, T, bg_mask.size(1)).contiguous().view(B*T, bg_mask.size(1))
 
-        h_in = h_in.view(B, T, L, -1) + h_pairs.view(B, T, 1, -1)
+        try:
+            h_in = h_in.view(B, T, L, -1) + h_pairs.view(B, T, 1, -1)
+        except Exception as e:
+            print(e)
         h_in = h_in.view(B, 1, T, L, -1).expand(B, T, T, L, -1).contiguous().view(B*T, T*L, -1)
         src_mask = src_mask.view(B, 1, T, L).expand(B, T, T, L).contiguous()
         src_mask = src_mask.masked_fill(pair_mask.view(B, T, T).unsqueeze(-1), 1).view(B*T, T*L) # make sure we don't leak the future

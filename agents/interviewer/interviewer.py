@@ -158,9 +158,7 @@ class Sq2SqQuestionGenerationModel(TorchGeneratorModel):
         B, T, L = tgt_in.size()
         tgt_in = tgt_in.view(B*T, L)
         dec_inputs = self.sq2sq_model.emb_drop(self.sq2sq_model.embedding(tgt_in))
-
         h_in, src_mask, (hn, cn), h_bg = self.sq2sq_model.encode_sources(src, src_mask, bg, bg_mask, turn_ids=turn_ids)
-
         log_probs, _, dec_attn, _ = self.sq2sq_model.decode(dec_inputs, hn, cn, h_in, src_mask, turn_ids=turn_ids, h_bg=self.sq2sq_model.drop(h_bg))
         _, preds = log_probs.max(dim=2)
         return log_probs[-1:, :, :], preds, {'h_in':h_in, 'src_mask': src_mask, 'hn': hn, 'cn': cn, 'h_bg': h_bg}
@@ -201,16 +199,22 @@ class InterviewerAgent(TorchGeneratorAgent):
             help='maximum number of deviation turns allowed for history',
         )
         parser.add_argument(
-            '--reinforcement-learning',
-            type='bool',
-            default=False,
-            help='train with reinforcement learning',
-        )
-        parser.add_argument(
             '--reinforcement-gemma',
             type=float,
             default=0.9,
             help='the discount factor for reinforcement learning',
+        )
+        parser.add_argument(
+            '--reinforcement-lambda',
+            type=float,
+            default=0.9,
+            help='the percentage of the reinforcement account for total loss',
+        )
+        parser.add_argument(
+            '--global-reward-lambda',
+            type=float,
+            default=0.5,
+            help='the percentage of the reinforcement account for total loss',
         )
         parser.add_argument(
             '--question-truncate',
@@ -223,6 +227,8 @@ class InterviewerAgent(TorchGeneratorAgent):
         self.rl_mode = opt['reinforcement_learning']
         self.exploration_steps = opt['exploration_steps']
         self.reinforcement_gemma = opt['reinforcement_gemma']
+        self.reinforcement_lambda = opt['reinforcement_lambda']
+        self.global_reward_lambda = opt['global_reward_lambda']
         self.question_truncate = opt['question_truncate']
         super().__init__(opt, shared)
 
@@ -341,12 +347,14 @@ class InterviewerAgent(TorchGeneratorAgent):
         :param self_message:
             The message corresponding to the output from batch_act.
         """
-        if self.rl_mode and self.exploration_steps > 0 and 'metrics' not in self_message:
+        # It is a very implicit and tedious way of identifying on going reinforcement episode, need better expression
+        if self.rl_mode and self.exploration_steps > 0 and not self_message.get('episode_end', True):
                 self.self_observe_diverged_dialogue_update(self_message)
                 self_message['diverged_dialogues'] = self.diverged_dialogues
         super().self_observe(self_message)
         if self.rl_mode and self.exploration_steps > 0:
-            if 'metrics' not in self_message:
+            # It is a very implicit and tedious way of identifying on going reinforcement episode, need better expression
+            if not self_message.get('episode_end', True):
                 self_message['history'] = self.history
             else:
                 self.diverged_dialogues.reset()
@@ -422,28 +430,15 @@ class InterviewerAgent(TorchGeneratorAgent):
                     new_obs_batch.append(div_obs)
         return new_obs_batch, index_batch_map
 
-
-    def batchify(self, master_batch, sort=False):
-        batch = Batch(batchsize=0, episode_done=master_batch[0]['episode_done'], valid_indices=list(range(len(master_batch))))
-        if batch.episode_done or len(master_batch) == 0:
-            return batch
-        valid_obs = [(i, ex) for i, ex in enumerate(master_batch) if self.is_valid(ex)]
-        if len(valid_obs) == 0:
-            return batch
-        valid_inds, exs = zip(*valid_obs)
-        if self.rl_mode and self.exploration_steps > 0 and len(self.diverged_dialogues.lineages) > 0:
-            obs_batch, index_batch_id_map = self.unpacking_obs_batcch_with_divergence(master_batch)
-        else:
-            obs_batch = master_batch
+    def get_preprocessed_batches(self, obs_batch, valid_inds):
         src_text_numb = [len(obs['text_vec']['src_text']) for obs in obs_batch]
         retval = self._collate_fn(obs_batch)
-
         inputs = trainer.unpack_batch(retval, self.use_cuda)
         src, tgt_in, tgt_out, turn_ids = \
             inputs['src'], inputs['tgt_in'], inputs['tgt_out'], inputs['turn_ids']
         bg = inputs.get('bg', None)
         batch = Batch(
-            batchsize=len(valid_obs),
+            batchsize=len(obs_batch),
             valid_indices=valid_inds,
             no_answer_reply=obs_batch[0].get('no_answer_reply', 'CANNOTANSWER'),
             src=src,
@@ -470,6 +465,24 @@ class InterviewerAgent(TorchGeneratorAgent):
         )
         return batch
 
+
+    def batchify(self, org_batch, sort=False):
+        batch = Batch(batchsize=0, episode_done=org_batch[0]['episode_done'], valid_indices=list(range(len(org_batch))))
+        if batch.episode_done or len(org_batch) == 0:
+            return batch
+        valid_obs = [(i, ex) for i, ex in enumerate(org_batch) if self.is_valid(ex)]
+        if len(valid_obs) == 0:
+            return batch
+        valid_inds, exs = zip(*valid_obs)
+        master_batch = self.get_preprocessed_batches(org_batch, valid_inds)
+        if self.rl_mode and self.exploration_steps > 0 and len(self.diverged_dialogues.lineages) > 0:
+            div_batch, index_batch_id_map = self.unpacking_obs_batcch_with_divergence(org_batch)
+            div_valid_inds = [i for i, b in enumerate(div_batch) if self.is_valid(b)]
+            master_batch['diverged_batch'] = self.get_preprocessed_batches(div_batch, div_valid_inds)
+        return master_batch
+
+    #This function is for stress test before an intensive training is carried out.
+    #Need time to implement this
     def _init_cuda_buffer(self, batchsize, maxlen, force=False):
         return
 
@@ -522,14 +535,17 @@ class InterviewerAgent(TorchGeneratorAgent):
             return None
         else:
             if self.rl_mode:
-                return self.rl_train_step(batch)
+                div_batch = batch.get('diverged_batch', None)
+                if not div_batch:
+                    self.model.train()
+                    self.zero_grad()
+                    div_batch = batch
+                self.history.dialogues_nll_loss.append(self.compute_loss(batch))
+                return self.rl_train_step(div_batch)
             else:
                 return super().train_step(batch)
 
     def rl_train_step(self, batch):
-        if len(self.history.dialogues) == 0:
-            self.model.train()
-            self.zero_grad()
         maxlen = self.question_truncate or 30
         beam_preds_scores, beams = self._generate(batch, self.beam_size, maxlen)
         preds, scores = zip(*beam_preds_scores)
@@ -549,7 +565,7 @@ class InterviewerAgent(TorchGeneratorAgent):
             # compute additional bleu scores
             self._compute_fairseq_bleu(batch, preds[0])
             self._compute_nltk_bleu(batch, text[0])
-        retval = Output(text[:1], log_probs=scores[:1], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, scores[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
+        retval = Output(text[:1], log_probs=scores[:1], episode_end=[batch.episode_end], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, scores[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
         return retval
 
     def reinforcement_backward_step(self):
@@ -593,14 +609,13 @@ class InterviewerAgent(TorchGeneratorAgent):
                     reward_tracker[r_name].append(r.data)
             reward = torch.stack(reward).mean()
             total_reward.append(reward*weight)
-        loss = torch.stack(total_reward).sum() * -1
-        self.record_local_metric('loss', AverageMetric.many([float(loss.data.cpu())], [1]))
-        self.backward(loss)
+        reinforcement_loss = torch.stack(total_reward).sum() * -1
+        total_loss = self.reinforcement_lambda * reinforcement_loss + (1- self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
+        self.backward(total_loss)
         self.update_params()
-        del loss
-        del total_reward
-        del log_probs
-        del reward_tracker
+        self.record_local_metric('total_loss', AverageMetric.many([float(total_loss.detach().cpu())], [1]))
+        self.record_local_metric('reward_loss', AverageMetric.many([float(reinforcement_loss.detach().cpu())], [1]))
+
 
 
     def tokenize_from_history(self, item, dialogues=None):

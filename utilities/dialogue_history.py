@@ -49,6 +49,7 @@ class DialogueHistory(History):
         super().__init__(opt, **kwargs)
         self.context = None
         self.dialogues = []
+        self.dialogues_nll_loss = []
         self.title = None
         self.background = None
         self.section_title = None
@@ -67,6 +68,7 @@ class DialogueHistory(History):
         self.background = None
         self.section_title = None
         self.rewards = None
+        self.dialogues_nll_loss = []
 
     def _update_dialogues(self, text, log_prob=None, reward=None, cache=None, ques_len=0):
         """
