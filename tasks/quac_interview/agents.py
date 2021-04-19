@@ -11,8 +11,8 @@ import torch
 NO_ANSWER_REPLY = "CANNOTANSWER"
 SUPPORTED_REWARDS = {'reward_question', 'reward_you',
                      'reward_conversation_repetition', 'reward_utterance_repetition',
-                     'reward_bot_response_length', 'reward_simple_coverage'}
-DEFAULT_REWARD_LIST = {'reward_simple_coverage', 'reward_conversation_repetition'}
+                     'reward_bot_response_length', 'reward_simple_coverage', 'reward_linguistic_acceptability'}
+DEFAULT_REWARD_LIST = {'reward_linguistic_acceptability'}
 
 
 def _path(opt):
@@ -95,8 +95,18 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         self.truncate = self.dict.maxtokens
         self.history = self.build_history()
         self.diverged_dialogues = None
+        self.reward_scorer = []
+        self.setup_scorer()
         super().__init__(opt, shared)
 
+    def setup_scorer(self):
+        if not self.rl_mode or not self.rewards_list:
+            return
+        assert len(self.rewards_list) == len(self.rewards_weights)
+        for i, r in enumerate(self.rewards_list):
+            weight = self.rewards_weights[i]
+            scorer = reward_funcs.REWARD_MAP[r](r, weight, use_cuda=self.use_cuda)
+            self.reward_scorer.append(scorer)
 
     def get(self, episode_idx, entry_idx=None):
         action = super().get(episode_idx, entry_idx)
@@ -127,14 +137,12 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
 
     def compute_rewards(self, conversations, last_action):
         rewards = {}
-        for r, w in zip(self.rewards_list, self.rewards_weights):
-            rewards[r] = {"master": None, "diverged_rewards": None, "weight": w}
-            if r not in SUPPORTED_REWARDS: raise NotImplementedError()
-            reward_func = getattr(reward_funcs, r)
-            master_rewards, diverged_rewards = reward_func(conversations, self.history, last_action=last_action,
-                                                           agent_dictionary=self.dict)
-            rewards[r]["master"] = master_rewards
-            rewards[r]["diverged_rewards"] = diverged_rewards
+        for scorer in self.reward_scorer:
+            rewards[scorer.name] = {"master": None, "diverged_rewards": None, "weight": scorer.weight}
+            master_rewards, diverged_rewards = scorer.reward(conversations, self.history, last_action=last_action,
+                                                            agent_dictionary=self.dict)
+            rewards[scorer.name]["master"] = master_rewards
+            rewards[scorer.name]["diverged_rewards"] = diverged_rewards
         return rewards
 
     def get_master_dialogue(self, lastest_diverged, last_response):
