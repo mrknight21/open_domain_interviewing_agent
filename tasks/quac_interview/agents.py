@@ -44,6 +44,7 @@ class DefaultTeacher(ParlAIDialogTeacher):
         if start:
             if not is_training:
                 start_position_character = int(ex["answer_starts"].split('|')[0])
+                answer_text = ex['text'].split('|')[0]
             else:
                 start_position_character = int(ex["answer_starts"])
             char_start_end = (start_position_character, start_position_character + len(answer_text))
@@ -138,7 +139,7 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
     def compute_rewards(self, conversations, last_action):
         rewards = {}
         for scorer in self.reward_scorer:
-            rewards[scorer.name] = {"master": None, "diverged_rewards": None, "weight": scorer.weight}
+            rewards[scorer.name] = {"master": None, "diverged_rewards": None, "weight": scorer.weight, 'global': scorer.global_reward}
             master_rewards, diverged_rewards = scorer.reward(conversations, self.history, last_action=last_action,
                                                             agent_dictionary=self.dict)
             rewards[scorer.name]["master"] = master_rewards
@@ -174,7 +175,7 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         if retvals:
             batch = self.batchify(retvals)
             with torch.no_grad():
-                _, reward, _, _, preds = self.model(**self._model_input(batch))
+                _, _, reward_items, stats, preds = self.model(**self._model_input(batch))
             logits, outputs = preds['logits'], preds['outputs']
             # update each retval with the output answers and also swap the question and text key
             for i, retval in enumerate(retvals):

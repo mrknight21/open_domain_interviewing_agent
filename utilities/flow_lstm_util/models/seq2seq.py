@@ -606,7 +606,7 @@ def get_logits(self, h_src, h_ctx, h_bg, src_mask, ctx_mask, bg_mask, tgt_out, t
     h_tgt_clf = pool(h_tgt_clf, tgt_mask)
     logit = self.hid_to_logit(h_tgt_clf).squeeze(-1)
 
-    #logit = self.hid_to_logit((pool(h_tgt_clf, tgt_mask))).squeeze(-1)
+    # logit = self.hid_to_logit((pool(h_tgt_clf, tgt_mask))).squeeze(-1)
 
     return logit, start_logit, end_logit, yesno_logit, followup_logit, nll
 
