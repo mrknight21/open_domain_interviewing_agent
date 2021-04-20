@@ -20,6 +20,27 @@ contractions = ["'s", "'d", "'ld", "n't", "'re", "'ll", "'ve"]
 filters = set(stopwords + contractions + punct)
 
 
+def normalize_rewards(rewards):
+    index = 0
+    reward_index_map = []
+    flat_rewards = []
+    nmlz_rewards = None
+    for conv in rewards:
+        reward_index_map.append([])
+        for r in conv:
+            flat_rewards.append(r)
+            reward_index_map[-1].append(index)
+            index += 1
+    if flat_rewards:
+        nmlz_rewards = normalizeZ(np.array(flat_rewards))
+        for i, conv in enumerate(rewards):
+            for j, _ in enumerate(conv):
+                index = reward_index_map[i][j]
+                rewards[i][j] = nmlz_rewards[index]
+    return rewards
+
+
+
 def normalizeZ(x):
     x = np.array(x)
     mean = np.mean(x)
