@@ -139,7 +139,8 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
     def compute_rewards(self, conversations, last_action):
         rewards = {}
         for scorer in self.reward_scorer:
-            rewards[scorer.name] = {"master": None, "diverged_rewards": None, "weight": scorer.weight, 'global': scorer.global_reward}
+            rewards[scorer.name] = {"master": None, "diverged_rewards": None, "weight": scorer.weight,
+                                    'global': scorer.global_reward, 'required_normalise':scorer.required_normalise}
             master_rewards, diverged_rewards = scorer.reward(conversations, self.history, last_action=last_action,
                                                             agent_dictionary=self.dict)
             rewards[scorer.name]["master"] = master_rewards

@@ -75,6 +75,7 @@ class BasedRewardScorer(object):
         self.weight = weight
         self.name = name
         self.use_cuda = use_cuda
+        self.required_normalise = False
 
     def reward(self, conversations, master_history=None, last_action=None, agent_dictionary=None):
         return None
@@ -384,6 +385,11 @@ class SimpleCoverageScorer(BasedGlobalRewardScorer):
 
 
 class OutputLengthScorer(BasedLocalRewardScorer):
+
+    def __init__(self, name, weight, use_cuda=True):
+        from torch.utils.data import TensorDataset
+        super().__init__(name, weight, use_cuda=use_cuda)
+        self.required_normalise = True
 
     def reward(self, conversations, master_history=None, last_action=None, agent_dictionary=None):
         """Allocates reward for longer bot outputs/responses.
