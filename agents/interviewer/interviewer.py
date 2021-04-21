@@ -688,10 +688,9 @@ class InterviewerAgent(TorchGeneratorAgent):
         return retval
 
     def rl_eval_final_step(self, batch):
-        total_reward = []
         gen_reward_index = []
         if not self.history.rewards:
-            return total_reward
+            return
         log_probs = self.diverged_dialogues.get_log_probs()
         for content in log_probs:
             if len(content['ques_len']) == 0:
@@ -699,46 +698,52 @@ class InterviewerAgent(TorchGeneratorAgent):
             else:
                 gen_reward_index.append(list(range(content['dialogue_length'])[-len(content['ques_len']):]))
         reward_tracker = {}
+        reward_step_tracker = {}
+        reward_step_d_tracker = {}
+        reward_full_lineage_tracker = {}
         for r_name, r in self.history.rewards.items():
             master_raw_r = r['master']
             diverged_raw_r = r['diverged_rewards']
-            gen_raw_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
-            normalise_gen_r = normalize_rewards(gen_raw_r)
-            weight = r['weight']
-            reward = []
-            reward_tracker[r_name] = []
+            is_global = r['global']
+            required_normalise = r['required_normalise']
+
+            gen_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
+            if required_normalise:
+                gen_r = normalize_rewards(gen_r)
+            mean_gen_r = np.mean([r for conv in gen_r for r in conv])
+            reward_tracker[r_name] = mean_gen_r
+            reward_step_tracker[r_name] = []
+            reward_step_d_tracker[r_name] = []
+            reward_full_lineage_tracker[r_name] = {'reward': [], 'diff': []}
             for step in range(len(master_raw_r)):
                 diverged_lineages = [(l.dialogues, diverged_raw_r[i], log_probs[i])
                                     for i, l in enumerate(self.diverged_dialogues.lineages)
                                     if log_probs[i]['log_probs'] and l.gen_start_index == step]
                 if not diverged_lineages:
                     continue
-                turns_count = len(diverged_lineages[0])
+                turns_count = len(diverged_lineages[0][0])
                 dl_logprobs = [dl[2]['log_probs'] for dl in diverged_lineages]
-                dl_ques_len = [torch.tensor(dl[2]['ques_len']) for dl in diverged_lineages]
                 num_generated_turns = len(dl_logprobs[-1])
                 dl_rewards = [dl[1][-num_generated_turns:] for dl in diverged_lineages]
                 master_turns = master_raw_r[turns_count-num_generated_turns:turns_count]
-                concat_rewards = np.array([master_turns] + dl_rewards)
-                discounted_rewards = discount(concat_rewards, self.reinforcement_gemma)
-                normalized_rewards = normalizeZ(discounted_rewards)
+                _rewards = np.array([master_turns] + dl_rewards)
+                if is_global:
+                    _rewards = discount(_rewards, self.reinforcement_gemma)
+                if required_normalise:
+                    _rewards = normalizeZ(_rewards)
                 #use master reward as baseline
-                # relative_reward = torch.tensor(normalized_rewards[1:] - normalized_rewards[0])
-                relative_reward = torch.tensor(normalized_rewards[1:])
-                # relative_reward = torch.tensor(dl_rewards)
-                if self.use_cuda:
-                    relative_reward = relative_reward.cuda()
-                    dl_ques_len = [dql.cuda() for dql in dl_ques_len]
-                r = (relative_reward * torch.stack([torch.stack(dl_logprobs[i])/dl_ques_len[i] for i in range(len(dl_logprobs))])).mean()
+                d_reward = _rewards[1:] - _rewards[0]
+                _rewards = _rewards[1:]
+                if num_generated_turns == len(master_raw_r):
+                    reward_full_lineage_tracker[r_name]['reward'].append(_rewards.mean(0))
+                    reward_full_lineage_tracker[r_name]['diff'].append(d_reward.mean(0))
+                else:
+                    reward_step_tracker[r_name].append(_rewards.mean(0))
+                    reward_step_d_tracker[r_name].append(d_reward.mean(0))
 
-                reward.append(r)
-                reward_tracker[r_name].append(r.data)
-            reward = torch.stack(reward).mean()
-            total_reward.append(reward*weight)
-        reinforcement_loss = torch.stack(total_reward).sum() * -1
-        total_loss = self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
-        self.record_local_metric('total_loss', AverageMetric.many([float(total_loss.detach().cpu())], [1]))
-        self.record_local_metric('reward_loss', AverageMetric.many([float(reinforcement_loss.detach().cpu())], [1]))
+            avg_diff = np.mean([r for conv in reward_step_d_tracker[r_name] for r in conv])
+            self.record_local_metric(r_name+'_mean', AverageMetric.many([float(mean_gen_r)], [1]))
+            self.record_local_metric(r_name+'_avg_diff', AverageMetric.many([float(avg_diff)], [1]))
 
     def tokenize_from_history(self, item, dialogues=None):
         history = self.history
