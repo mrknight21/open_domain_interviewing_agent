@@ -28,6 +28,7 @@ class DefaultTeacher(ParlAIDialogTeacher):
     def __init__(self, opt, shared=None):
         opt = copy.deepcopy(opt)
         opt['parlaidialogteacher_datafile'] = _path(opt)
+        self.context_token_weights = []
         super().__init__(opt, shared)
 
     def get(self, episode_idx, entry_idx=None):
@@ -35,6 +36,11 @@ class DefaultTeacher(ParlAIDialogTeacher):
         Get a specific example from the dataset.
         """
         ex = self.episodes[episode_idx][entry_idx]
+        context_token_weights = ex.get("context_token_weights", None)
+        if context_token_weights:
+            context_token_weights = eval(context_token_weights)
+            if len(context_token_weights) > 0:
+                self.context_token_weights = context_token_weights
         is_training = self.datatype == "train"
         qas_id = str(episode_idx) + "_" + str(entry_idx)
         answer_text = ex['text']
@@ -79,6 +85,7 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         self.query_truncate = opt['query_maximum_length']
         self.context_truncate = opt['context_maximum_length']
         self.history_truncate = opt['history_maximum_length']
+        self.history = self.build_history()
         self.rl_mode = opt['reinforcement_learning']
         self.exploration_steps = opt['exploration_steps']
         self.use_cuda = not opt['no_cuda']
@@ -94,11 +101,11 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         if self.use_cuda:
             self.model.cuda()
         self.truncate = self.dict.maxtokens
-        self.history = self.build_history()
         self.diverged_dialogues = None
         self.reward_scorer = []
         self.setup_scorer()
         super().__init__(opt, shared)
+
 
     def setup_scorer(self):
         if not self.rl_mode or not self.rewards_list:
