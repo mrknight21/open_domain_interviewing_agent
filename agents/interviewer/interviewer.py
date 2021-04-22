@@ -97,7 +97,10 @@ class Sq2SqQuestionGenerationModel(TorchGeneratorModel):
         return log_probs, incr_state
 
     def load_question_generation_model(self, opt, dict):
-        filename = os.path.join(opt['datapath'], constants.FINE_TUNE_FILE)
+        if opt.get('init_finetune', False):
+            filename = os.path.join(opt['datapath'], constants.FINE_TUNE_FILE)
+        else:
+            filename = os.path.join(opt['datapath'], constants.BASE_MODEL_FILE)
         print(f"Loading model from '{filename}'...")
         checkpoint = torch.load(filename, lambda storage, loc: storage)
         args = checkpoint['config']
@@ -186,6 +189,12 @@ class InterviewerAgent(TorchGeneratorAgent):
             default=False,
             help='print probability of chosen class during ' 'interactive mode',
         )
+        parser.add_argument(
+            '--init-finetune',
+            type='bool',
+            default=False,
+            help='init pretrained teacher model with finetuned mode',
+        )
         # miscellaneous arguments
         parser.add_argument(
             '--reinforcement-learning',
@@ -232,6 +241,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         self.reinforcement_lambda = opt['reinforcement_lambda']
         self.global_reward_lambda = opt['global_reward_lambda']
         self.question_truncate = opt['question_truncate']
+        self.init_finetune = opt['init_finetune']
         super().__init__(opt, shared)
 
     @staticmethod

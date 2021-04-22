@@ -12,7 +12,7 @@ NO_ANSWER_REPLY = "CANNOTANSWER"
 SUPPORTED_REWARDS = {'reward_question', 'reward_you',
                      'reward_conversation_repetition', 'reward_utterance_repetition',
                      'reward_bot_response_length', 'reward_simple_coverage', 'reward_linguistic_acceptability', 'reward_weighted_coverage'}
-DEFAULT_REWARD_LIST = {'reward_weighted_coverage'}
+DEFAULT_REWARD_LIST = {'reward_weighted_coverage', 'reward_linguistic_acceptability'}
 
 
 def _path(opt):

@@ -43,4 +43,5 @@ YESNO_TO_ID = { 'y': 0, 'n': 1, 'x': 2 }
 
 VOCAB_FILE = 'Interviewee/vocab.pkl'
 TEACHER_FILE = 'Interviewee/teacher_model.pt'
-FINE_TUNE_FILE = 'Interviewee/model.pt'
+FINE_TUNE_FILE = 'Interviewee/finetuned_model.pt'
+BASE_MODEL_FILE = 'Interviewee/model.pt'
