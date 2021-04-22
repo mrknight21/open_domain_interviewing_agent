@@ -54,6 +54,7 @@ class DialogueHistory(History):
         self.background = None
         self.section_title = None
         self.rewards = None
+        self.context_token_weights = None
 
     def reset(self):
         """
@@ -68,6 +69,7 @@ class DialogueHistory(History):
         self.background = None
         self.section_title = None
         self.rewards = None
+        self.context_token_weights = None
         self.dialogues_nll_loss = []
 
     def _update_dialogues(self, text, log_prob=None, reward=None, cache=None, ques_len=0):

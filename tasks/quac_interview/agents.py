@@ -11,8 +11,8 @@ import torch
 NO_ANSWER_REPLY = "CANNOTANSWER"
 SUPPORTED_REWARDS = {'reward_question', 'reward_you',
                      'reward_conversation_repetition', 'reward_utterance_repetition',
-                     'reward_bot_response_length', 'reward_simple_coverage', 'reward_linguistic_acceptability'}
-DEFAULT_REWARD_LIST = {'reward_linguistic_acceptability'}
+                     'reward_bot_response_length', 'reward_simple_coverage', 'reward_linguistic_acceptability', 'reward_weighted_coverage'}
+DEFAULT_REWARD_LIST = {'reward_weighted_coverage'}
 
 
 def _path(opt):
@@ -28,7 +28,6 @@ class DefaultTeacher(ParlAIDialogTeacher):
     def __init__(self, opt, shared=None):
         opt = copy.deepcopy(opt)
         opt['parlaidialogteacher_datafile'] = _path(opt)
-        self.context_token_weights = []
         super().__init__(opt, shared)
 
     def get(self, episode_idx, entry_idx=None):
@@ -40,7 +39,9 @@ class DefaultTeacher(ParlAIDialogTeacher):
         if context_token_weights:
             context_token_weights = eval(context_token_weights)
             if len(context_token_weights) > 0:
-                self.context_token_weights = context_token_weights
+                context_token_weights = context_token_weights
+            else:
+                context_token_weights = None
         is_training = self.datatype == "train"
         qas_id = str(episode_idx) + "_" + str(entry_idx)
         answer_text = ex['text']
@@ -73,7 +74,8 @@ class DefaultTeacher(ParlAIDialogTeacher):
             'background': ex['background'],
             'section_title': ex['section_title'],
             'title': ex['title'],
-            'character_start_end': char_start_end
+            'character_start_end': char_start_end,
+            'context_token_weights': context_token_weights
         }
         return action
 
@@ -137,7 +139,14 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
 
     def get_reward(self, model_answers, action):
         histories_dialogues = [self.history.dialogues] + self.diverged_dialogues.get_dialogues()
+        ans_count = len(model_answers)
         for i, m_ans in enumerate(model_answers):
+            # Reserve for the longest lineage when doing validaiton
+            if self.datatype == 'valid' or self.datatype == 'test':
+                if ans_count == i+1:
+                    histories_dialogues[-1][-1].answer = m_ans['text']
+                    histories_dialogues[-1][-1].cache = self.history.get_cache(m_ans)
+                    continue
             histories_dialogues[i][-1].answer = m_ans['text']
             histories_dialogues[i][-1].cache = self.history.get_cache(m_ans)
         rewards = self.compute_rewards(histories_dialogues, last_action=action)

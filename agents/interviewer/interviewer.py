@@ -38,14 +38,16 @@ class InterviewerHistory(DialogueHistory):
         if "text" in obs and obs["text"]:
             super().update_history(obs, temp_history)
         else:
+            if not self.context_token_weights and obs.get("context_token_weights", None):
+                self.context_token_weights = obs["context_token_weights"]
             if not self.context and obs.get('context', None):
-                    self.context = obs['context']
+                self.context = obs['context']
             if not self.background and obs.get('background', None):
-                    self.background = obs['background']
+                self.background = obs['background']
             if not self.title and obs.get('title', None):
-                    self.title = obs['title']
+                self.title = obs['title']
             if not self.section_title and obs.get('section_title', None):
-                    self.section_title = obs['section_title']
+                self.section_title = obs['section_title']
         self.temp_history = temp_history
 
 class Sq2SqQuestionGenerationModel(TorchGeneratorModel):
