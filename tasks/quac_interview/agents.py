@@ -12,7 +12,11 @@ NO_ANSWER_REPLY = "CANNOTANSWER"
 SUPPORTED_REWARDS = {'reward_question', 'reward_you',
                      'reward_conversation_repetition', 'reward_utterance_repetition',
                      'reward_bot_response_length', 'reward_simple_coverage', 'reward_linguistic_acceptability', 'reward_weighted_coverage'}
-DEFAULT_REWARD_LIST = {'reward_weighted_coverage', 'reward_linguistic_acceptability'}
+DEFAULT_REWARD_LIST = {'reward_self_bleu'}
+
+GLOBAL_SCORER = []
+
+LOCAL_SCORER = []
 
 
 def _path(opt):
@@ -129,7 +133,10 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
             history_diverged_dialogues = self.diverged_dialogues.get_dialogues(active_only=True)
             histories_dialogues.extend(history_diverged_dialogues)
         if histories_dialogues:
-            model_answers = self.get_model_answer(histories_dialogues, action)
+            try:
+                model_answers = self.get_model_answer(histories_dialogues, action)
+            except Exception as e:
+                pass
         if model_answers:
             action['model_answers'] = model_answers
         if action['episode_done'] and model_answers:

@@ -5,6 +5,8 @@ Note that rewards should be normalized for best results.
 import string
 from transformers import RobertaForSequenceClassification, RobertaTokenizer
 from torch.utils.data import TensorDataset, DataLoader
+import nltk
+from nltk.translate.bleu_score import SmoothingFunction
 
 
 import numpy as np
@@ -204,6 +206,59 @@ class LinguisticAcceptabilityScorer(BasedLocalRewardScorer):
             prev_conv_index = c_index
             prev_dialogue_idnex = d_index
         return master_rewards, diverge_reward
+
+
+class SelfBleuScorer(BasedLocalRewardScorer):
+
+    def reward(self, conversations, master_history=None, last_action=None, agent_dictionary=None):
+        master_conv = None
+        if master_history and last_action:
+            master_conv = master_history.dialogues
+            master_conv[-1].answer = last_action['text']
+            conversations = [master_conv] + conversations
+        num_convs = len(conversations)
+        diverged_rewards = []
+        master_rewards = None
+        master_cache = {}
+        for i in range(num_convs):
+            dialogue_reward = []
+            conv = conversations[i]
+            episode_num = len(conv)
+            if master_cache:
+                bot_responses = [turn.question for turn in conv if turn.generated]
+            else:
+                bot_responses = [turn.question for turn in conv]
+            tokenized = [nltk.word_tokenize(resp) for resp in bot_responses]
+            if master_cache:
+                tokenized = master_cache['tokenized'][:episode_num-len(bot_responses)] + tokenized
+                bot_responses = master_cache['responses'][:episode_num-len(bot_responses)] + bot_responses
+            for j in range(len(conv)):
+                if master_rewards and not conv[j].generated:
+                    dialogue_reward.append(master_rewards[j])
+                else:
+                    refs = tokenized[:j]
+                    hypothesis = tokenized[j]
+                    prior_resonse = bot_responses[:j]
+                    resonse = bot_responses[j]
+                    score = 1
+                    if refs:
+                        if resonse in prior_resonse:
+                            score = 0
+                        else:
+                            bleu_score = nltk.translate.bleu_score.sentence_bleu(refs, hypothesis,
+                                                                                smoothing_function=SmoothingFunction().method1)
+                            score = 1 - bleu_score
+                    dialogue_reward.append(score)
+            if master_conv and i == 0:
+                master_rewards = dialogue_reward
+                master_cache['tokenized'] = tokenized
+                master_cache['responses'] = bot_responses
+            else:
+                diverged_rewards.append(dialogue_reward)
+        if master_conv:
+            return master_rewards, diverged_rewards
+        else:
+            return diverged_rewards
 
 
 class UtteranceRepetitionScorer(BasedLocalRewardScorer):
@@ -522,4 +577,5 @@ REWARD_MAP = {'reward_question': QuestionTokensScorer, 'reward_you': YouScorer,
               'reward_bot_response_length': OutputLengthScorer,
               'reward_simple_coverage': SimpleCoverageScorer,
               'reward_linguistic_acceptability': LinguisticAcceptabilityScorer,
-              'reward_weighted_coverage':WeightedCoverageScorer}
+              'reward_weighted_coverage':WeightedCoverageScorer,
+              'reward_self_bleu': SelfBleuScorer}

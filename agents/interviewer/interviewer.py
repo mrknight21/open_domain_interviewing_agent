@@ -195,6 +195,12 @@ class InterviewerAgent(TorchGeneratorAgent):
             default=False,
             help='init pretrained teacher model with finetuned mode',
         )
+        parser.add_argument(
+            '--use-master-baseline',
+            type='bool',
+            default=False,
+            help='use reward from the master lineage as the baseline',
+        )
         # miscellaneous arguments
         parser.add_argument(
             '--reinforcement-learning',
@@ -242,6 +248,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         self.global_reward_lambda = opt['global_reward_lambda']
         self.question_truncate = opt['question_truncate']
         self.init_finetune = opt['init_finetune']
+        self.use_master_baseline = opt['use_master_baseline']
         super().__init__(opt, shared)
 
     @staticmethod
@@ -291,7 +298,7 @@ class InterviewerAgent(TorchGeneratorAgent):
             if i == 0:
                 self.diverged_dialogues.add_lineage(text, self.history, message=retval)
             else:
-                if not self.is_training and self.opt['datatype'] == 'valid' and i + 1 == cnt:
+                if not self.is_training and i + 1 == cnt:
                     self.diverged_dialogues.lineages[-1]._update_dialogues(text, cache=cache)
                     continue
                 self.diverged_dialogues.lineages[i]._update_dialogues(text, cache=cache)
@@ -300,7 +307,7 @@ class InterviewerAgent(TorchGeneratorAgent):
                 # freeze lineage that reach the exploration limits
                 if len(list(filter(lambda x: x.complete and x.generated, lineage.dialogues))) >= self.exploration_steps:
                     # allow the longest gen lineage to grow for later evaluation
-                    if not self.is_training and self.opt['datatype'] == 'valid' and lineage.gen_start_index == 0:
+                    if not self.is_training and lineage.gen_start_index == 0:
                         continue
                     else:
                         lineage.freeze = True
@@ -318,7 +325,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         model_outputs = self_message['diverged_outputs']
         cnt = len(model_outputs)
         for i, (text, logprob, ques_len) in enumerate(model_outputs):
-            if not self.is_training and self.opt['datatype'] == 'valid' and i+1==cnt:
+            if not self.is_training and i+1==cnt:
                 self.diverged_dialogues.lineages[-1]._update_dialogues(text, log_prob=logprob,
                                                                                   ques_len=ques_len)
                 continue
@@ -607,10 +614,14 @@ class InterviewerAgent(TorchGeneratorAgent):
         for r_name, r in self.history.rewards.items():
             master_raw_r = r['master']
             diverged_raw_r = r['diverged_rewards']
-            gen_raw_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
-            normalise_gen_r = normalize_rewards(gen_raw_r)
+            is_global = r['global']
+            required_normalise = r['required_normalise']
+            gen_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
+            if required_normalise:
+                gen_r = normalize_rewards(gen_r)
+            mean_gen_r = np.mean([r for conv in gen_r for r in conv])
             weight = r['weight']
-            reward = []
+            rewards = []
             reward_tracker[r_name] = []
             for step in range(len(master_raw_r)):
                 diverged_lineages = [(l.dialogues, diverged_raw_r[i], log_probs[i])
@@ -618,29 +629,33 @@ class InterviewerAgent(TorchGeneratorAgent):
                                     if log_probs[i]['log_probs'] and l.gen_start_index == step]
                 if not diverged_lineages:
                     continue
-                turns_count = len(diverged_lineages[0])
+                turns_count = len(diverged_lineages[0][0])
                 dl_logprobs = [dl[2]['log_probs'] for dl in diverged_lineages]
                 dl_ques_len = [torch.tensor(dl[2]['ques_len']) for dl in diverged_lineages]
                 num_generated_turns = len(dl_logprobs[-1])
                 dl_rewards = [dl[1][-num_generated_turns:] for dl in diverged_lineages]
                 master_turns = master_raw_r[turns_count-num_generated_turns:turns_count]
-                concat_rewards = np.array([master_turns] + dl_rewards)
-                discounted_rewards = discount(concat_rewards, self.reinforcement_gemma)
-                normalized_rewards = normalizeZ(discounted_rewards)
+                _rewards = np.array([master_turns] + dl_rewards)
+                if is_global:
+                    _rewards = discount(_rewards, self.reinforcement_gemma)
+                if required_normalise:
+                    _rewards = normalizeZ(_rewards)
                 #use master reward as baseline
-                # relative_reward = torch.tensor(normalized_rewards[1:] - normalized_rewards[0])
-                relative_reward = torch.tensor(normalized_rewards[1:])
+                if self.use_master_baseline:
+                    _reward = torch.tensor(_rewards[1:] - _rewards[0])
+                else:
+                    _reward = torch.tensor(_rewards[1:])
                 # relative_reward = torch.tensor(dl_rewards)
                 if self.use_cuda:
-                    relative_reward = relative_reward.cuda()
+                    _reward = _reward.cuda()
                     dl_ques_len = [dql.cuda() for dql in dl_ques_len]
-                r = (relative_reward * torch.stack([torch.stack(dl_logprobs[i])/dl_ques_len[i] for i in range(len(dl_logprobs))])).mean()
+                r = (_reward * torch.stack([torch.stack(dl_logprobs[i])/dl_ques_len[i] for i in range(len(dl_logprobs))])).mean()
 
-                reward.append(r)
+                rewards.append(r)
                 reward_tracker[r_name].append(r.data)
-            reward = torch.stack(reward).mean()
+            reward = torch.stack(rewards).mean()
             total_reward.append(reward*weight)
-        reinforcement_loss = torch.stack(total_reward).sum() * -1
+        reinforcement_loss = torch.stack(total_reward).sum() * -100
         total_loss = self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
         self.backward(total_loss)
         self.update_params()
