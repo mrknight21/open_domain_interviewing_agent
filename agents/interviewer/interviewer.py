@@ -601,7 +601,10 @@ class InterviewerAgent(TorchGeneratorAgent):
 
     def reinforcement_backward_step(self):
         total_reward = []
+        local_rewards_filters = {}
+        local_rewards_tracker = {}
         gen_reward_index = []
+        reward_tracker = {}
         if not self.history.rewards:
             return total_reward
         log_probs = self.diverged_dialogues.get_log_probs()
@@ -610,8 +613,27 @@ class InterviewerAgent(TorchGeneratorAgent):
                 gen_reward_index.append([])
             else:
                 gen_reward_index.append(list(range(content['dialogue_length'])[-len(content['ques_len']):]))
-        reward_tracker = {}
-        for r_name, r in self.history.global_rewards.items():
+
+        global_rewards = {name: content for name, content in self.history.rewards.items() if content['global']}
+        local_rewards = {name: content for name, content in self.history.rewards.items() if not content['global']}
+
+        for r_name, r in local_rewards.items():
+            master_raw_r = r['master']
+            diverged_raw_r = r['diverged_rewards']
+            gen_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
+            mean_gen_r = np.mean([r for conv in gen_r for r in conv])
+            if not local_rewards_filters:
+                local_rewards_filters = {"master": master_raw_r, "diverged": diverged_raw_r}
+            else:
+                for i, r in enumerate(master_raw_r):
+                    local_rewards_filters["master"][i] = r * local_rewards_filters["master"][i]
+                for i, conv in enumerate(local_rewards_filters["diverged"]):
+                    for j, r in enumerate(conv):
+                        local_rewards_filters["diverged"][i][j] = local_rewards_filters["diverged"][i][j] * r
+            local_rewards_tracker[r_name] = mean_gen_r
+            self.record_local_metric(r_name + '_mean', AverageMetric.many([float(mean_gen_r)], [1]))
+
+        for r_name, r in global_rewards.items():
             master_raw_r = r['master']
             diverged_raw_r = r['diverged_rewards']
             is_global = r['global']
@@ -619,7 +641,7 @@ class InterviewerAgent(TorchGeneratorAgent):
             gen_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
             if required_normalise:
                 gen_r = normalize_rewards(gen_r)
-            mean_gen_r = np.mean([r for conv in gen_r for r in conv])
+            # mean_gen_r = np.mean([r for conv in gen_r for r in conv])
             weight = r['weight']
             rewards = []
             reward_tracker[r_name] = []
@@ -786,10 +808,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         strings_to_tokenize.append(item['single_label_text'])
         strings_to_tokenize.append(item['text'])
         qas.append((item['single_label_text'], ""))
-        try:
-            tokenized, offsets = self.dict.bulk_tokenize(strings_to_tokenize, return_offsets=True)
-        except Exception as e:
-            pass
+        tokenized, offsets = self.dict.bulk_tokenize(strings_to_tokenize, return_offsets=True)
         retval = {'title': tokenized[0], 'section_title': tokenized[1], 'context': tokenized[2], 'background': tokenized[3], 'qas':[]}
         tokenized = tokenized[4:]
         parsed_idx = 0
