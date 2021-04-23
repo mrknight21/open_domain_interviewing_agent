@@ -14,7 +14,7 @@ from parlai_internal.utilities.flow_lstm_util.models.seq2seq import Seq2SeqModel
 from parlai_internal.utilities.flow_lstm_util.models import trainer
 from parlai_internal.utilities.flow_lstm_util import constants, util
 from parlai_internal.utilities.dialogue_history import DialogueHistory, DialogueLineages
-from parlai_internal.reward_funcs import discount, normalize_rewards, normalizeZ
+from parlai_internal.reward_funcs import forward_average_discount, normalize_rewards, normalizeZ
 from parlai.core.params import ParlaiParser
 from parlai.core.opt import Opt
 
@@ -611,7 +611,7 @@ class InterviewerAgent(TorchGeneratorAgent):
             else:
                 gen_reward_index.append(list(range(content['dialogue_length'])[-len(content['ques_len']):]))
         reward_tracker = {}
-        for r_name, r in self.history.rewards.items():
+        for r_name, r in self.history.global_rewards.items():
             master_raw_r = r['master']
             diverged_raw_r = r['diverged_rewards']
             is_global = r['global']
@@ -637,7 +637,7 @@ class InterviewerAgent(TorchGeneratorAgent):
                 master_turns = master_raw_r[turns_count-num_generated_turns:turns_count]
                 _rewards = np.array([master_turns] + dl_rewards)
                 if is_global:
-                    _rewards = discount(_rewards, self.reinforcement_gemma)
+                    _rewards = forward_average_discount(_rewards)
                 if required_normalise:
                     _rewards = normalizeZ(_rewards)
                 #use master reward as baseline

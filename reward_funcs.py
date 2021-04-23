@@ -66,6 +66,15 @@ def discount(rewards, gamma=0.9):
         discounted[:, step] = running_add
     return discounted
 
+def forward_average_discount(rewards, gamma=1.0):
+    batch_size = rewards.shape[0]
+    episode_len = rewards.shape[1]
+    discounted = np.zeros_like(rewards)
+    running_add = np.zeros((batch_size))
+    for step in reversed(range(episode_len)):
+        running_add = gamma * running_add + rewards[:, step]
+        discounted[:, step] = running_add / (episode_len - step)
+    return discounted
 
 def cosine_similarity(a, b):
     return np.sum(a * b, axis=1) / np.sqrt((np.sum(a * a, axis=1) * np.sum(b * b, axis=1)))
