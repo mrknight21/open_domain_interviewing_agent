@@ -94,7 +94,6 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         self.exploration_steps = opt['exploration_steps']
         self.use_cuda = not opt['no_cuda']
         self.rewards_list = opt.get('rewards_list', DEFAULT_REWARD_LIST)
-        self.rewards_weights = opt.get('rewards_weights', [1/len(self.rewards_list)]*len(self.rewards_list))
         # now set up any fields that all instances may need
         self.EMPTY = torch.zeros(0, dtype=torch.long)
         self.NULL_IDX = self.dict[self.dict.null_token]
@@ -114,10 +113,8 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
     def setup_scorer(self):
         if not self.rl_mode or not self.rewards_list:
             return
-        assert len(self.rewards_list) == len(self.rewards_weights)
         for i, r in enumerate(self.rewards_list):
-            weight = self.rewards_weights[i]
-            scorer = reward_funcs.REWARD_MAP[r](r, weight, use_cuda=self.use_cuda)
+            scorer = reward_funcs.REWARD_MAP[r](r, use_cuda=self.use_cuda)
             self.reward_scorer.append(scorer)
 
     def get(self, episode_idx, entry_idx=None):
@@ -160,7 +157,7 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
     def compute_rewards(self, conversations, last_action):
         rewards = {}
         for scorer in self.reward_scorer:
-            rewards[scorer.name] = {"master": None, "diverged_rewards": None, "weight": scorer.weight,
+            rewards[scorer.name] = {"master": None, "diverged_rewards": None,
                                     'global': scorer.global_reward, 'required_normalise':scorer.required_normalise}
             master_rewards, diverged_rewards = scorer.reward(conversations, self.history, last_action=last_action,
                                                             agent_dictionary=self.dict)

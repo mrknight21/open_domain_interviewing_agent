@@ -81,9 +81,8 @@ def cosine_similarity(a, b):
 
 class BasedRewardScorer(object):
 
-    def __init__(self, name, weight, use_cuda=False):
+    def __init__(self, name, use_cuda=False):
         self.global_reward = False
-        self.weight = weight
         self.name = name
         self.use_cuda = use_cuda
         self.required_normalise = False
@@ -93,22 +92,19 @@ class BasedRewardScorer(object):
 
 class BasedGlobalRewardScorer(BasedRewardScorer):
 
-    def __init__(self, name, weight, use_cuda=False):
-        super().__init__(name, weight, use_cuda=use_cuda)
+    def __init__(self, name, use_cuda=False):
+        super().__init__(name, use_cuda=use_cuda)
         self.global_reward = True
 
 class BasedLocalRewardScorer(BasedRewardScorer):
 
-    def __init__(self, name, weight, use_cuda=False):
-        super().__init__(name, weight, use_cuda=use_cuda)
+    def __init__(self, name, use_cuda=False):
+        super().__init__(name, use_cuda=use_cuda)
 
 class LinguisticAcceptabilityScorer(BasedLocalRewardScorer):
 
-    def __init__(self, name, weight, use_cuda=True):
-        from torch.utils.data import TensorDataset
-
-
-        super().__init__(name, weight, use_cuda=use_cuda)
+    def __init__(self, name, use_cuda=True):
+        super().__init__(name,  use_cuda=use_cuda)
         self.init_model()
         self.batch_size = 32
         self.softmax = torch.nn.Softmax(dim=1)
