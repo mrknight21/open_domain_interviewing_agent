@@ -16,10 +16,11 @@ from nltk.corpus import stopwords
 COLA_MODEL_KEY = "textattack/roberta-base-CoLA"
 EPSILON = np.finfo(np.float32).eps
 stopwords = stopwords.words('english')
-question_words = {'who', 'what', 'why', 'where', 'how', 'when'}
+question_words = ['who', 'what', 'why', 'where', 'how', 'when']
 punct = list(string.punctuation)
 contractions = ["'s", "'d", "'ld", "n't", "'re", "'ll", "'ve"]
 filters = set(stopwords + contractions + punct)
+question_filters = set(stopwords + contractions + punct + question_words)
 
 
 def normalize_rewards(rewards):
@@ -250,7 +251,7 @@ class SelfBleuScorer(BasedLocalRewardScorer):
                         if resonse in prior_resonse:
                             score = 0
                         else:
-                            bleu_score = nltk.translate.bleu_score.sentence_bleu(refs, hypothesis,
+                            bleu_score = nltk.translate.bleu_score.sentence_bleu(refs, hypothesis, weights=(1/3,1/3,1/3),
                                                                                 smoothing_function=SmoothingFunction().method1)
                             score = 1 - bleu_score
                     dialogue_reward.append(score)
@@ -345,6 +346,44 @@ class YouScorer(BasedLocalRewardScorer):
         else:
             return diverged_rewards
 
+class NonEmptyScorer(BasedLocalRewardScorer):
+
+    def reward(self, conversations, master_history=None, last_action=None, agent_dictionary=None):
+        master_conv = None
+        if master_history and last_action:
+            master_conv = master_history.dialogues
+            master_conv[-1].answer = last_action['text']
+            conversations = [master_conv] + conversations
+        num_convs = len(conversations)
+        diverged_rewards = []
+        master_rewards = None
+        master_cache = {}
+        for i in range(num_convs):
+            dialogue_reward = []
+            conv = conversations[i]
+            episode_num = len(conv)
+            if master_cache:
+                bot_responses = [turn.question for turn in conv if turn.generated]
+            else:
+                bot_responses = [turn.question for turn in conv]
+            tokenized = [resp.split() for resp in bot_responses]
+            filtered = [[w for w in resp if w not in question_filters] for resp in tokenized]
+            for j in range(len(conv)):
+                if master_rewards and not conv[j].generated:
+                    dialogue_reward.append(master_rewards[j])
+                else:
+                    if len(filtered[j]) > 0:
+                        dialogue_reward.append(1)
+                    else:
+                        dialogue_reward.append(0)
+            if master_conv and i == 0:
+                master_rewards = dialogue_reward
+            else:
+                diverged_rewards.append(dialogue_reward)
+        if master_conv:
+            return master_rewards, diverged_rewards
+        else:
+            return diverged_rewards
 
 class ConversationRepetitionScorer(BasedLocalRewardScorer):
 
@@ -583,4 +622,5 @@ REWARD_MAP = {'reward_question': QuestionTokensScorer, 'reward_you': YouScorer,
               'reward_simple_coverage': SimpleCoverageScorer,
               'reward_linguistic_acceptability': LinguisticAcceptabilityScorer,
               'reward_weighted_coverage':WeightedCoverageScorer,
-              'reward_self_bleu': SelfBleuScorer}
+              'reward_self_bleu': SelfBleuScorer,
+              'reward_non_empty': NonEmptyScorer}

@@ -656,7 +656,7 @@ class InterviewerAgent(TorchGeneratorAgent):
                     _rewards = forward_average_discount(_rewards)
                 if required_normalise:
                     _rewards = normalizeZ(_rewards)
-                master_rs = _rewards[0] * master_filter
+                master_rs = _rewards[0]
                 diverged_rs = [r * diverged_filter[i][-num_generated_turns:] for i, r in enumerate(_rewards[1:])]
                 #use master reward as baseline
                 if self.use_master_baseline:
@@ -673,7 +673,7 @@ class InterviewerAgent(TorchGeneratorAgent):
             reward = torch.stack(rewards).mean()
             total_reward.append(reward*weight)
         reinforcement_loss = torch.stack(total_reward).sum() * -100
-        total_loss = self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
+        total_loss = 5 + self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
         self.backward(total_loss)
         self.update_params()
         self.record_local_metric('total_loss', AverageMetric.many([float(total_loss.detach().cpu())], [1]))
