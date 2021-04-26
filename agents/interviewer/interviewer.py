@@ -628,6 +628,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         weight = 1 / len(global_rewards)
         for r_name, r in global_rewards.items():
             master_raw_r = r['master']
+            master_raw_r = [max(mr, 0.03) for mr in master_raw_r]
             diverged_raw_r = r['diverged_rewards']
             is_global = r['global']
             required_normalise = r['required_normalise']
@@ -662,7 +663,7 @@ class InterviewerAgent(TorchGeneratorAgent):
                 if self.use_master_baseline:
                     _reward = torch.tensor(diverged_rs - master_rs)
                 else:
-                    _reward = torch.tensor(diverged_rs)
+                    _reward = torch.tensor(diverged_rs) - 0.05
                 # relative_reward = torch.tensor(dl_rewards)
                 if self.use_cuda:
                     _reward = _reward.cuda()
@@ -672,8 +673,8 @@ class InterviewerAgent(TorchGeneratorAgent):
                 reward_tracker[r_name].append(r.data)
             reward = torch.stack(rewards).mean()
             total_reward.append(reward*weight)
-        reinforcement_loss = torch.stack(total_reward).sum() * -100
-        total_loss = 5 + self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
+        reinforcement_loss = torch.stack(total_reward).sum() * 100
+        total_loss = self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
         self.backward(total_loss)
         self.update_params()
         self.record_local_metric('total_loss', AverageMetric.many([float(total_loss.detach().cpu())], [1]))
