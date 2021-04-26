@@ -146,7 +146,7 @@ class LinguisticAcceptabilityScorer(BasedLocalRewardScorer):
             dialogue_questions,  # Sentence to encode.
             add_special_tokens=True,  # Add '[CLS]' and '[SEP]'
             max_length=30,
-            pad_to_max_length=True,
+            padding=True,
             return_attention_mask=True,  # Construct attn. masks.
             return_tensors='pt',  # Return pytorch tensors.
             truncation=True

@@ -620,7 +620,7 @@ class InterviewerAgent(TorchGeneratorAgent):
             else:
                 for i, r in enumerate(master_raw_r):
                     local_rewards_filters["master"][i] = r * local_rewards_filters["master"][i]
-                for i, conv in enumerate(local_rewards_filters["diverged"]):
+                for i, conv in enumerate(diverged_raw_r):
                     for j, r in enumerate(conv):
                         local_rewards_filters["diverged"][i][j] = local_rewards_filters["diverged"][i][j] * r
             local_rewards_tracker[r_name] = mean_gen_r
@@ -628,7 +628,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         weight = 1 / len(global_rewards)
         for r_name, r in global_rewards.items():
             master_raw_r = r['master']
-            master_raw_r = [max(mr, 0.03) for mr in master_raw_r]
+            # master_raw_r = [max(mr, 0.03) for mr in master_raw_r]
             diverged_raw_r = r['diverged_rewards']
             is_global = r['global']
             required_normalise = r['required_normalise']
@@ -673,7 +673,7 @@ class InterviewerAgent(TorchGeneratorAgent):
                 reward_tracker[r_name].append(r.data)
             reward = torch.stack(rewards).mean()
             total_reward.append(reward*weight)
-        reinforcement_loss = torch.stack(total_reward).sum() * 100
+        reinforcement_loss = torch.stack(total_reward).sum() * -1
         total_loss = self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
         self.backward(total_loss)
         self.update_params()
