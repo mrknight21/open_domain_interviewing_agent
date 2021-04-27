@@ -7,6 +7,7 @@ from transformers import RobertaForSequenceClassification, RobertaTokenizer
 from torch.utils.data import TensorDataset, DataLoader
 import nltk
 from nltk.translate.bleu_score import SmoothingFunction
+from parlai.core.metrics import F1Metric
 
 
 import numpy as np
@@ -16,7 +17,7 @@ from nltk.corpus import stopwords
 COLA_MODEL_KEY = "textattack/roberta-base-CoLA"
 EPSILON = np.finfo(np.float32).eps
 stopwords = stopwords.words('english')
-question_words = ['who', 'what', 'why', 'where', 'how', 'when']
+question_words = ['who', 'what', 'why', 'where', 'how', 'when', '<UNK>']
 punct = list(string.punctuation)
 contractions = ["'s", "'d", "'ld", "n't", "'re", "'ll", "'ve"]
 filters = set(stopwords + contractions + punct)
@@ -41,8 +42,6 @@ def normalize_rewards(rewards):
                 index = reward_index_map[i][j]
                 rewards[i][j] = nmlz_rewards[index]
     return rewards
-
-
 
 def normalizeZ(x):
     x = np.array(x)
@@ -96,6 +95,7 @@ class BasedGlobalRewardScorer(BasedRewardScorer):
     def __init__(self, name, use_cuda=False):
         super().__init__(name, use_cuda=use_cuda)
         self.global_reward = True
+        self.required_normalise = True
 
 class BasedLocalRewardScorer(BasedRewardScorer):
 
@@ -151,7 +151,6 @@ class LinguisticAcceptabilityScorer(BasedLocalRewardScorer):
             return_tensors='pt',  # Return pytorch tensors.
             truncation=True
         )
-
         # Combine the training inputs into a TensorDataset.
         dataset = TensorDataset(encoded_dict['input_ids'], encoded_dict['attention_mask'])
         batches = DataLoader(
@@ -251,9 +250,8 @@ class SelfBleuScorer(BasedLocalRewardScorer):
                         if resonse in prior_resonse:
                             score = 0
                         else:
-                            bleu_score = nltk.translate.bleu_score.sentence_bleu(refs, hypothesis, weights=(1/3,1/3,1/3),
-                                                                                smoothing_function=SmoothingFunction().method1)
-                            score = 1 - bleu_score
+                            _, _, f1_score = max([F1Metric._prec_recall_f1_score(hypothesis, ref) for ref in refs])
+                            score = 1 - f1_score
                     dialogue_reward.append(score)
             if master_conv and i == 0:
                 master_rewards = dialogue_reward

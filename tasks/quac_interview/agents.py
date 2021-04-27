@@ -205,8 +205,7 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
                 retval['yesno'] = int(logits['yesno'][i].argmax())
                 retval['followup'] = int(logits['followup'][i].argmax())
                 retval['token_start_end'] = (token_start, token_end+1)
-                # retval['reward'] = reward.data
-                # retval['reward_items'] = reward_items
+                retval['reward_items'] = {r_name: r[i] for r_name, r in reward_items.items()}
         return retvals
 
     def observe(self, observation):
