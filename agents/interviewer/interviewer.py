@@ -628,14 +628,14 @@ class InterviewerAgent(TorchGeneratorAgent):
         weight = 1 / len(global_rewards)
         for r_name, r in global_rewards.items():
             master_raw_r = r['master']
-            # master_raw_r = [max(mr, 0.03) for mr in master_raw_r]
             diverged_raw_r = r['diverged_rewards']
             is_global = r['global']
             required_normalise = r['required_normalise']
             gen_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
+            flat_gen_r = [r for conv in gen_r for r in conv]
             if required_normalise:
-                gen_r = normalize_rewards(gen_r)
-            # mean_gen_r = np.mean([r for conv in gen_r for r in conv])
+                mean_gen_r = np.mean(flat_gen_r)
+                std_gen_r = np.std(flat_gen_r)
             rewards = []
             reward_tracker[r_name] = []
             for step in range(len(master_raw_r)):
@@ -656,14 +656,14 @@ class InterviewerAgent(TorchGeneratorAgent):
                 if is_global:
                     _rewards = forward_average_discount(_rewards)
                 if required_normalise:
-                    _rewards = normalizeZ(_rewards)
+                    _rewards = (_rewards - mean_gen_r) / std_gen_r
                 master_rs = _rewards[0]
                 diverged_rs = [r * diverged_filter[i][-num_generated_turns:] for i, r in enumerate(_rewards[1:])]
                 #use master reward as baseline
                 if self.use_master_baseline:
                     _reward = torch.tensor(diverged_rs - master_rs)
                 else:
-                    _reward = torch.tensor(diverged_rs) - 0.05
+                    _reward = torch.tensor(diverged_rs)
                 # relative_reward = torch.tensor(dl_rewards)
                 if self.use_cuda:
                     _reward = _reward.cuda()
@@ -673,7 +673,7 @@ class InterviewerAgent(TorchGeneratorAgent):
                 reward_tracker[r_name].append(r.data)
             reward = torch.stack(rewards).mean()
             total_reward.append(reward*weight)
-        reinforcement_loss = torch.stack(total_reward).sum() * -1
+        reinforcement_loss = torch.stack(total_reward).sum() * -10
         total_loss = self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
         self.backward(total_loss)
         self.update_params()
@@ -772,10 +772,10 @@ class InterviewerAgent(TorchGeneratorAgent):
                 dl_rewards = [dl[1][-num_generated_turns:] for dl in diverged_lineages]
                 master_turns = master_raw_r[turns_count-num_generated_turns:turns_count]
                 _rewards = np.array([master_turns] + dl_rewards)
-                if is_global:
-                    _rewards = forward_average_discount(_rewards, self.reinforcement_gemma)
-                if required_normalise:
-                    _rewards = normalizeZ(_rewards)
+                # if is_global:
+                #     _rewards = forward_average_discount(_rewards, self.reinforcement_gemma)
+                # if required_normalise:
+                #     _rewards = normalizeZ(_rewards)
                 #use master reward as baseline
                 d_reward = _rewards[1:] - _rewards[0]
                 _rewards = _rewards[1:]
