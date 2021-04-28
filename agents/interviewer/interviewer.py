@@ -288,13 +288,14 @@ class InterviewerAgent(TorchGeneratorAgent):
         for i, retval in enumerate(model_output):
             text = retval['text']
             cache = self.diverged_dialogues.get_cache(retval)
+            reward = retval['reward_items']
             if i == 0:
-                self.diverged_dialogues.add_lineage(text, self.history, message=retval)
+                self.diverged_dialogues.add_lineage(text, self.history, message=retval, reward=reward)
             else:
                 if not self.is_training and i + 1 == cnt:
-                    self.diverged_dialogues.lineages[-1]._update_dialogues(text, cache=cache)
+                    self.diverged_dialogues.lineages[-1]._update_dialogues(text, cache=cache, reward=reward)
                     continue
-                self.diverged_dialogues.lineages[i]._update_dialogues(text, cache=cache)
+                self.diverged_dialogues.lineages[i]._update_dialogues(text, cache=cache, reward=reward)
         for lineage in self.diverged_dialogues.lineages:
             if not lineage.freeze:
                 # freeze lineage that reach the exploration limits
@@ -356,6 +357,10 @@ class InterviewerAgent(TorchGeneratorAgent):
         if self.rl_mode and len(self.diverged_dialogues.lineages) > 0:
             self.diverged_dialogues_update(observation)
         super().observe(observation)
+        if observation.get('model_answers', None):
+            master_reward_items = observation['model_answers'][0].get('reward_items', None)
+            if master_reward_items:
+                self.history.dialogues[-1].update(reward=master_reward_items)
         if self.rl_mode and observation['episode_done']:
             self.history.rewards = observation.get('rewards', None)
 
@@ -632,33 +637,40 @@ class InterviewerAgent(TorchGeneratorAgent):
             is_global = r['global']
             required_normalise = r['required_normalise']
             gen_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
-            flat_gen_r = [r for conv in gen_r for r in conv]
+            if is_global:
+                for i, conv in enumerate(gen_r):
+                    if len(conv) > 0:
+                        gen_r[i] = forward_average_discount(np.array([conv]))[0].tolist()
+                    else:
+                        gen_r[i] = np.array([])
+            if local_rewards_filters['diverged']:
+                for i, conv in enumerate(gen_r):
+                    if len(conv) > 0:
+                        gen_r[i] = [d*local_rewards_filters['diverged'][i][j] for j, d in enumerate(conv)]
             if required_normalise:
+                flat_gen_r = [r for conv in gen_r for r in conv]
                 mean_gen_r = np.mean(flat_gen_r)
                 std_gen_r = np.std(flat_gen_r)
             rewards = []
             reward_tracker[r_name] = []
             for step in range(len(master_raw_r)):
-                diverged_lineages = [(l.dialogues, diverged_raw_r[i], log_probs[i], local_rewards_filters['diverged'][i])
+                diverged_lineages = [(l.dialogues, gen_r[i], log_probs[i])
                                     for i, l in enumerate(self.diverged_dialogues.lineages)
                                     if log_probs[i]['log_probs'] and l.gen_start_index == step]
                 if not diverged_lineages:
                     continue
                 turns_count = len(diverged_lineages[0][0])
                 dl_logprobs = [dl[2]['log_probs'] for dl in diverged_lineages]
-                diverged_filter = [dl[3] for dl in diverged_lineages]
                 dl_ques_len = [torch.tensor(dl[2]['ques_len']) for dl in diverged_lineages]
                 num_generated_turns = len(dl_logprobs[-1])
-                dl_rewards = [dl[1][-num_generated_turns:] for dl in diverged_lineages]
+                dl_rewards = [dl[1] for dl in diverged_lineages]
                 master_rs = master_raw_r[turns_count-num_generated_turns:turns_count]
                 master_filter = local_rewards_filters['master'][turns_count-num_generated_turns:turns_count]
                 _rewards = np.array([master_rs] + dl_rewards)
-                if is_global:
-                    _rewards = forward_average_discount(_rewards)
                 if required_normalise:
                     _rewards = (_rewards - mean_gen_r) / std_gen_r
                 master_rs = _rewards[0]
-                diverged_rs = [r * diverged_filter[i][-num_generated_turns:] for i, r in enumerate(_rewards[1:])]
+                diverged_rs = _rewards[1:]
                 #use master reward as baseline
                 if self.use_master_baseline:
                     _reward = torch.tensor(diverged_rs - master_rs)
