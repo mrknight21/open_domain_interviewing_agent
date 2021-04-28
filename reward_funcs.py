@@ -264,6 +264,25 @@ class SelfBleuScorer(BasedLocalRewardScorer):
         else:
             return diverged_rewards
 
+class TeacherSpecificityScorer(BasedLocalRewardScorer):
+
+    def reward(self, conversations, master_history=None, last_action=None, agent_dictionary=None):
+        master_conv = None
+        if master_history and last_action:
+            master_conv = master_history.dialogues
+            if not master_conv[0].reward.get('specificity', None):
+                return None, None
+            master_rewards = [d.reward['specificity'] for d in master_conv]
+        diverged_rewards = []
+        for conv in conversations:
+            conv_reward = []
+            for d in conv:
+                conv_reward.append(d.reward['specificity'])
+            diverged_rewards.append(conv_reward)
+        if master_conv:
+            return master_rewards, diverged_rewards
+        else:
+            return diverged_rewards
 
 class UtteranceRepetitionScorer(BasedLocalRewardScorer):
 
@@ -621,4 +640,5 @@ REWARD_MAP = {'reward_question': QuestionTokensScorer, 'reward_you': YouScorer,
               'reward_linguistic_acceptability': LinguisticAcceptabilityScorer,
               'reward_weighted_coverage':WeightedCoverageScorer,
               'reward_self_bleu': SelfBleuScorer,
-              'reward_non_empty': NonEmptyScorer}
+              'reward_non_empty': NonEmptyScorer,
+              'reward_specificity': TeacherSpecificityScorer}

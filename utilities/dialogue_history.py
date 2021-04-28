@@ -115,7 +115,7 @@ class DialogueHistory(History):
         """
         if "text" in obs and obs["text"] is not None:
             log_prob = obs.get('log_prob', None)
-            # reward = obs.get('reward', None)
+            reward = obs.get('reward_items', None)
             text = obs['text']
             cache = self.get_cache(obs)
             if not self.context and obs.get('context', None):
@@ -233,9 +233,8 @@ class DialogueLineages(object):
         if message:
             # create new lineage from ground truth answer
             cache = self.get_cache(message)
-            reward = message
             log_prob = message.get('log_prob', None)
-            reward = message.get('reward', None)
+            reward = message.get('reward_items', None)
             text = message.get('text', "")
         new_lineage._update_dialogues(text, log_prob=log_prob, reward=reward, cache=cache, ques_len=ques_len)
         self.lineages.appendleft(new_lineage)

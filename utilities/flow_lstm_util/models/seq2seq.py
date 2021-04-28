@@ -893,8 +893,8 @@ class TeacherModel(nn.Module):
         pos_novelty = pos_novelty.masked_fill(non_example_mask, 0)
         reward = self.args['lambda1'] * logit_pos + (1 - self.args['lambda1']) * pos_novelty
         logits0 = torch.cat([logit_pos], 0)
-        logits = torch.nn.torch.cat([logits0.new_zeros(logits0.size(0), 1), logits0.unsqueeze(1)], 1)
-        logits = torch.nn.functional.softmax(logits, 1)[:1]
+        logits = torch.cat([logits0.new_zeros(logits0.size(0), 1), logits0.unsqueeze(1)], 1)
+        logits = torch.nn.functional.softmax(logits, 1)[:,1]
         reward_items = {"novelty": pos_novelty, 'specificity': logits}
         stats = {'acc': acc, 'f1': f1}
         pred_text = [" ".join(ctx_text[idx][s:e+1]) if not cm else ctx_text[idx][-1] for idx, (s, e, cm) in enumerate(zip(start_pos.cpu(), end_pos.cpu(), cannotanswer_pos.cpu()))]
