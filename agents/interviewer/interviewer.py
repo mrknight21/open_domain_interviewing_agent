@@ -234,10 +234,16 @@ class InterviewerAgent(TorchGeneratorAgent):
             help='the limit for the number of tokens in a question',
         )
         parser.add_argument(
-            '--full-length_generation',
+            '--single-full-length-generation',
             type='bool',
             default=False,
             help='train or evaluation with a single full length lineage',
+        )
+        parser.add_argument(
+            '--record-step-stats',
+            type='bool',
+            default=False,
+            help='record the reward mean for each diverge step',
         )
 
     def __init__(self, opt: Opt, shared=None):
@@ -248,6 +254,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         self.question_truncate = opt['question_truncate']
         self.init_finetune = opt['init_finetune']
         self.use_master_baseline = opt['use_master_baseline']
+        self.single_full_length_generation = opt['single_full_length_generation']
         super().__init__(opt, shared)
 
     @staticmethod
@@ -295,9 +302,9 @@ class InterviewerAgent(TorchGeneratorAgent):
             text = retval['text']
             cache = self.diverged_dialogues.get_cache(retval)
             reward = retval['reward_items']
-            if i == 0:
+            if i == 0 and not self.single_full_length_generation:
                 self.diverged_dialogues.add_lineage(text, self.history, message=retval, reward=reward)
-            else:
+            elif i != 0:
                 if not self.is_training and i + 1 == cnt:
                     self.diverged_dialogues.lineages[-1]._update_dialogues(text, cache=cache, reward=reward)
                     continue
@@ -319,9 +326,10 @@ class InterviewerAgent(TorchGeneratorAgent):
         :param model_outputs: message object  with 'text', 'log_probs', and 'diverged_outputs'
         :return: Update the diverged_dialogues object
         """
-        self.diverged_dialogues.add_lineage(self_message["text"], self.history,
-                                            log_prob=self_message.get("log_probs", None),
-                                            ques_len=self_message.get("ques_len", None))
+        if not self.single_full_length_generation or len(self.diverged_dialogues.lineages) == 0:
+            self.diverged_dialogues.add_lineage(self_message["text"], self.history,
+                                                log_prob=self_message.get("log_probs", None),
+                                                ques_len=self_message.get("ques_len", None))
         model_outputs = self_message['diverged_outputs']
         cnt = len(model_outputs)
         for i, (text, logprob, ques_len) in enumerate(model_outputs):
@@ -737,10 +745,10 @@ class InterviewerAgent(TorchGeneratorAgent):
             diverged_raw_r = r['diverged_rewards']
             is_global = r['global']
             required_normalise = r['required_normalise']
-
-            gen_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
-            if required_normalise:
-                gen_r = normalize_rewards(gen_r)
+            if self.single_full_length_generation:
+                gen_r = [diverged_raw_r[1]]
+            else:
+                gen_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
             mean_gen_r = np.mean([r for conv in gen_r for r in conv])
             reward_tracker[r_name] = mean_gen_r
             reward_step_tracker[r_name] = []
@@ -758,16 +766,14 @@ class InterviewerAgent(TorchGeneratorAgent):
                 dl_rewards = [dl[1][-num_generated_turns:] for dl in diverged_lineages]
                 master_turns = master_raw_r[turns_count-num_generated_turns:turns_count]
                 _rewards = np.array([master_turns] + dl_rewards)
-                # if is_global:
-                #     _rewards = forward_average_discount(_rewards, self.reinforcement_gemma)
-                # if required_normalise:
-                #     _rewards = normalizeZ(_rewards)
-                #use master reward as baseline
                 d_reward = _rewards[1:] - _rewards[0]
                 _rewards = _rewards[1:]
                 if num_generated_turns == len(master_raw_r):
                     reward_full_lineage_tracker[r_name]['reward'].append(_rewards.mean(0))
                     reward_full_lineage_tracker[r_name]['diff'].append(d_reward.mean(0))
+                    if self.single_full_length_generation:
+                        for i, r in enumerate(_rewards[0]):
+                            self.record_local_metric(r_name + '_step_'+str(i), AverageMetric.many([float(r)], [1]))
                 else:
                     reward_step_tracker[r_name].append(_rewards.mean(0))
                     reward_step_d_tracker[r_name].append(d_reward.mean(0))
@@ -775,6 +781,7 @@ class InterviewerAgent(TorchGeneratorAgent):
             avg_diff = np.mean([r for conv in reward_step_d_tracker[r_name] for r in conv])
             self.record_local_metric(r_name+'_mean', AverageMetric.many([float(mean_gen_r)], [1]))
             self.record_local_metric(r_name+'_avg_diff', AverageMetric.many([float(avg_diff)], [1]))
+
 
     def tokenize_from_history(self, item, dialogues=None):
         history = self.history

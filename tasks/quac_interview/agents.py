@@ -15,7 +15,7 @@ SUPPORTED_REWARDS = {'reward_question', 'reward_you',
 
 DEFAULT_REWARD_LIST = {'reward_specificity', 'reward_weighted_coverage', 'reward_linguistic_acceptability', 'reward_self_bleu'}
 
-
+DEFAULT_EVA_LIST = {'reward_specificity', 'reward_weighted_coverage', 'reward_linguistic_acceptability', 'reward_self_bleu', 'reward_non_empty'}
 
 def _path(opt):
     # Build the data if it doesn't exist.
@@ -93,12 +93,15 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         self.rl_mode = opt['reinforcement_learning']
         self.exploration_steps = opt['exploration_steps']
         self.use_cuda = not opt['no_cuda']
-        self.rewards_list = opt.get('rewards_list', DEFAULT_REWARD_LIST)
         # now set up any fields that all instances may need
         self.EMPTY = torch.zeros(0, dtype=torch.long)
         self.NULL_IDX = self.dict[self.dict.null_token]
         self.START_IDX = self.dict[self.dict.start_token]
         self.END_IDX = self.dict[self.dict.end_token]
+        if opt['datatype']== 'valid':
+            self.rewards_list = opt.get('rewards_list', DEFAULT_EVA_LIST)
+        else:
+            self.rewards_list = opt.get('rewards_list', DEFAULT_REWARD_LIST)
         self.model = self.build_model()
         self.model.eval()
         if self.use_cuda:
