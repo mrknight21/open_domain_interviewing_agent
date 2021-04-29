@@ -259,7 +259,7 @@ def prune_decoded_seqs(seqs):
     out = []
     for s in seqs:
         if constants.EOS in s:
-            idx = s.index(constants.EOS_TOKEN)
+            idx = s.index(constants.EOS)
             out += [s[:idx]]
         else:
             out += [s]

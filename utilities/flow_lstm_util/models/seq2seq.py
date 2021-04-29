@@ -391,7 +391,7 @@ class Seq2SeqModel(nn.Module):
             hyp = seq2sequtils.prune_hyp(hyp)
             all_hyp += [hyp]
 
-        return all_hyp
+        return all_hyp, all_scores
 
     def sample(self, src, src_mask, turn_ids, top_p=1, bg=None, bg_mask=None, return_pair_level=False, return_logprobs=False):
         """ Top-p sampling """

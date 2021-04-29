@@ -576,24 +576,8 @@ class InterviewerAgent(TorchGeneratorAgent):
 
     def rl_train_step(self, batch):
         maxlen = self.question_truncate or 30
-        beam_preds_scores, beams = self._generate(batch, self.beam_size, maxlen)
-        preds, scores = zip(*beam_preds_scores)
-        self._add_generation_metrics(batch, preds)
-        # bsz x beamsize
-        beam_texts: List[List[Tuple[str, float]]] = []
-        for beam in beams:
-            beam_texts.append([])
-            for tokens, score in beam.get_rescored_finished():
-                try:
-                    beam_texts[-1].append((self._v2t(tokens), score.item()))
-                except KeyError:
-                    logging.error("Decoding error: %s", tokens)
-                    continue
-        text = [self._v2t(p) for p in preds] if preds is not None else None
-        if text and self.compute_tokenized_bleu:
-            # compute additional bleu scores
-            self._compute_fairseq_bleu(batch, preds[0])
-            self._compute_nltk_bleu(batch, text[0])
+        preds, scores = self.predict(batch, latest_turn_only=True)
+        text = [ " ".join(seq) for seq in preds]
         retval = Output(text[:1], log_probs=scores[:1], episode_end=[batch.episode_end], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, scores[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
         return retval
 
@@ -723,24 +707,8 @@ class InterviewerAgent(TorchGeneratorAgent):
                 )
         preds = None
         maxlen = self.question_truncate or 30
-        beam_preds_scores, beams = self._generate(div_batch, self.beam_size, maxlen)
-        preds, scores = zip(*beam_preds_scores)
-        self._add_generation_metrics(batch, preds)
-        # bsz x beamsize
-        beam_texts: List[List[Tuple[str, float]]] = []
-        for beam in beams:
-            beam_texts.append([])
-            for tokens, score in beam.get_rescored_finished():
-                try:
-                    beam_texts[-1].append((self._v2t(tokens), score.item()))
-                except KeyError:
-                    logging.error("Decoding error: %s", tokens)
-                    continue
-        text = [self._v2t(p) for p in preds] if preds is not None else None
-        if text and self.compute_tokenized_bleu:
-            # compute additional bleu scores
-            self._compute_fairseq_bleu(batch, preds[0])
-            self._compute_nltk_bleu(batch, text[0])
+        g_seqs, scores = self.predict(div_batch, latest_turn_only=True)
+        text = [ seq.join(" ") for seq in g_seqs]
         retval = Output(text[:1], log_probs=scores[:1], episode_end=[batch.episode_end], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, scores[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
         return retval
 
@@ -871,7 +839,8 @@ class InterviewerAgent(TorchGeneratorAgent):
         return {'src': batch['src'], 'src_mask': src_mask, 'turn_ids': batch['turn_ids'],
                 'tgt_in': batch['tgt_in'], 'bg': batch['bg'], 'bg_mask': bg_mask, 'tgt_out': batch['tgt_out']}
 
-    def predict(self, batch, beam_size=1, return_pair_level=False):
+    def predict(self, batch, beam_size=1, return_pair_level=False, latest_turn_only=False):
+        excluded_turn_indx = []
         inputs = trainer.unpack_batch(batch, self.use_cuda)
         src, tgt_in, tgt_out, turn_ids = \
             inputs['src'], inputs['tgt_in'], inputs['tgt_out'], inputs['turn_ids']
@@ -879,8 +848,12 @@ class InterviewerAgent(TorchGeneratorAgent):
         src_mask = src.eq(constants.PAD_ID)
         bg_mask = bg.eq(constants.PAD_ID) if bg is not None else None
         batch_size = src.size(0)
+        turn_size = src.size(1)
         preds, log_probs = self.model.sq2sq_model.predict(src, src_mask, turn_ids, beam_size=beam_size, bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level)
-        pred_seqs = [[self.dict.ind2tok[id_] for id_ in ids] for ids in preds] # unmap to tokens
+        if latest_turn_only:
+            excluded_turn_indx = [i for i in range(len(preds)) if (i + 1) % turn_size != 0]
+        pred_seqs = [[self.dict.ind2tok[id_] for id_ in ids] for i,  ids in enumerate(preds) if i not in excluded_turn_indx]
+        log_probs = [log_prob for i,  log_prob in enumerate(log_probs) if i not in excluded_turn_indx]
         pred_seqs = util.prune_decoded_seqs(pred_seqs)
         return pred_seqs, log_probs
 
@@ -889,14 +862,14 @@ class InterviewerAgent(TorchGeneratorAgent):
         src, tgt_in, tgt_out, turn_ids = \
             inputs['src'], inputs['tgt_in'], inputs['tgt_out'], inputs['turn_ids']
         bg = inputs.get('bg', None)
-        src_mask = src.eq(util.constant.PAD_ID)
-        bg_mask = bg.eq(util.constant.PAD_ID) if bg is not None else None
+        src_mask = src.eq(constants.PAD_ID)
+        bg_mask = bg.eq(constants.PAD_ID) if bg is not None else None
 
         if not return_preds:
             self.model.eval()
         batch_size = src.size(0)
         preds = self.model.sq2sq_model.sample(src, src_mask, turn_ids, top_p=top_p, bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level)
         preds, nll = preds
-        pred_seqs = [[self.vocab['id2word'][id_] for id_ in ids] for ids in preds] # unmap to tokens
+        pred_seqs = [[self.dict.ind2tok[id_] for id_ in ids] for ids in preds] # unmap to tokens
         pred_seqs = util.prune_decoded_seqs(pred_seqs)
         return pred_seqs, preds, nll
