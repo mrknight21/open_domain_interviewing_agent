@@ -233,6 +233,12 @@ class InterviewerAgent(TorchGeneratorAgent):
             default=30,
             help='the limit for the number of tokens in a question',
         )
+        parser.add_argument(
+            '--full-length_generation',
+            type='bool',
+            default=False,
+            help='train or evaluation with a single full length lineage',
+        )
 
     def __init__(self, opt: Opt, shared=None):
         self.rl_mode = opt['reinforcement_learning']
@@ -707,8 +713,8 @@ class InterviewerAgent(TorchGeneratorAgent):
                 )
         preds = None
         maxlen = self.question_truncate or 30
-        g_seqs, scores = self.predict(div_batch, latest_turn_only=True)
-        text = [ seq.join(" ") for seq in g_seqs]
+        preds, scores = self.predict(div_batch, latest_turn_only=True)
+        text = [ " ".join(seq) for seq in preds]
         retval = Output(text[:1], log_probs=scores[:1], episode_end=[batch.episode_end], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, scores[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
         return retval
 
