@@ -245,6 +245,12 @@ class InterviewerAgent(TorchGeneratorAgent):
             default=False,
             help='record the reward mean for each diverge step',
         )
+        parser.add_argument(
+            '--sampling-generation',
+            type='bool',
+            default=False,
+            help='train or evaluation with a single full length lineage',
+        )
 
     def __init__(self, opt: Opt, shared=None):
         self.rl_mode = opt['reinforcement_learning']
@@ -688,7 +694,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         if self.reinforcement_lambda != 1.0:
             total_loss = self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
         else:
-            total_loss = self.reinforcement_lambda
+            total_loss = reinforcement_loss
         self.backward(total_loss)
         self.update_params()
         self.record_local_metric('total_loss', AverageMetric.many([float(total_loss.detach().cpu())], [1]))
