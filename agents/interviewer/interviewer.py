@@ -583,7 +583,8 @@ class InterviewerAgent(TorchGeneratorAgent):
                     self.model.train()
                     self.zero_grad()
                     div_batch = batch
-                self.history.dialogues_nll_loss.append(self.compute_loss(batch))
+                if self.reinforcement_lambda != 1.0:
+                    self.history.dialogues_nll_loss.append(self.compute_loss(batch))
                 return self.rl_train_step(div_batch)
             else:
                 return super().train_step(batch)
@@ -684,7 +685,10 @@ class InterviewerAgent(TorchGeneratorAgent):
             reward = torch.stack(rewards).mean()
             total_reward.append(reward*weight)
         reinforcement_loss = torch.stack(total_reward).sum() * -10
-        total_loss = self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
+        if self.reinforcement_lambda != 1.0:
+            total_loss = self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
+        else:
+            total_loss = self.reinforcement_lambda
         self.backward(total_loss)
         self.update_params()
         self.record_local_metric('total_loss', AverageMetric.many([float(total_loss.detach().cpu())], [1]))
