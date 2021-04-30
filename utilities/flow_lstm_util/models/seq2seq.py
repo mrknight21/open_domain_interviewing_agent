@@ -393,13 +393,19 @@ class Seq2SeqModel(nn.Module):
 
         return all_hyp, all_scores
 
-    def sample(self, src, src_mask, turn_ids, top_p=1, bg=None, bg_mask=None, return_pair_level=False, return_logprobs=False):
+    def sample(self, src, src_mask, turn_ids, top_p=1, bg=None, bg_mask=None, return_pair_level=False, excluded_turn_indx=None):
         """ Top-p sampling """
         batch_size = src.size(0) * src.size(1)
 
         # (1) encode source
         h_in, src_mask, (hn, cn), h_bg = self.encode_sources(src, src_mask, bg, bg_mask, turn_ids=turn_ids)
-
+        if excluded_turn_indx:
+            selected_index = torch.tensor([i for i in range(batch_size) if i not in excluded_turn_indx])
+            if self.use_cuda:
+                selected_index = selected_index.cuda()
+            batch_size = selected_index.size(0)
+            h_in, src_mask, hn, cn, h_bg = h_in.index_select(0, selected_index), src_mask.index_select(0, selected_index), hn.index_select(1, selected_index),\
+                                           cn.index_select(1, selected_index), h_bg.index_select(0, selected_index)
         # (2) initialize start of sequence
         dec_inputs = cn.new_full((batch_size, 1), SOS_ID, dtype=torch.long)
 

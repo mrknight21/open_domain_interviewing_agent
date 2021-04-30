@@ -890,11 +890,10 @@ class InterviewerAgent(TorchGeneratorAgent):
         bg_mask = bg.eq(constants.PAD_ID) if bg is not None else None
         turn_size = src.size(1)
         batch_size = src.size(0)
-        preds = self.model.sq2sq_model.sample(src, src_mask, turn_ids, top_p=top_p, bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level)
-        preds, nll = preds
         if latest_turn_only:
-            excluded_turn_indx = [i for i in range(len(preds)) if (i + 1) % turn_size != 0]
-        pred_seqs = [[self.dict.ind2tok[id_] for id_ in ids] for i,  ids in enumerate(preds) if i not in excluded_turn_indx]
-        nll = [prob for i, prob in enumerate(nll) if i not in excluded_turn_indx]
+            excluded_turn_indx = [i for i in range(batch_size*turn_size) if (i + 1) % turn_size != 0]
+        preds = self.model.sq2sq_model.sample(src, src_mask, turn_ids, top_p=top_p, bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level, excluded_turn_indx= excluded_turn_indx)
+        preds, nll = preds
+        pred_seqs = [[self.dict.ind2tok[id_] for id_ in ids] for i,  ids in enumerate(preds)]
         pred_seqs = util.prune_decoded_seqs(pred_seqs)
         return pred_seqs, preds, nll
