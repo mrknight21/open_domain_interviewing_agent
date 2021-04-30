@@ -438,6 +438,8 @@ class Seq2SeqModel(nn.Module):
 
             dec_inputs = dec_inputs.unsqueeze(1)
             preds.append(dec_inputs)
+            if all(ended):
+                break
 
         preds = torch.cat(preds, 1).tolist()
 
