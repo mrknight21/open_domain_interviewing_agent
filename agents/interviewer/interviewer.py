@@ -597,9 +597,9 @@ class InterviewerAgent(TorchGeneratorAgent):
 
     def rl_train_step(self, batch):
         maxlen = self.question_truncate or 30
-        preds, scores = self.predict(batch, latest_turn_only=True)
-        text = [ " ".join(seq) for seq in preds]
-        retval = Output(text[:1], log_probs=scores[:1], episode_end=[batch.episode_end], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, scores[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
+        pred_seqs, preds, nll = self.sample(batch, latest_turn_only=True)
+        text = [ " ".join(seq) for seq in pred_seqs]
+        retval = Output(text[:1], log_probs=nll[:1], episode_end=[batch.episode_end], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, nll[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
         return retval
 
     def reinforcement_backward_step(self):
@@ -690,7 +690,7 @@ class InterviewerAgent(TorchGeneratorAgent):
                 reward_tracker[r_name].append(r.data)
             reward = torch.stack(rewards).mean()
             total_reward.append(reward*weight)
-        reinforcement_loss = torch.stack(total_reward).sum() * -10
+        reinforcement_loss = torch.stack(total_reward).sum() * 10
         if self.reinforcement_lambda != 1.0:
             total_loss = self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
         else:
@@ -880,19 +880,21 @@ class InterviewerAgent(TorchGeneratorAgent):
         pred_seqs = util.prune_decoded_seqs(pred_seqs)
         return pred_seqs, log_probs
 
-    def sample(self, batch, top_p=1, return_pair_level=False, return_preds=False):
+    def sample(self, batch, top_p=1, return_pair_level=False, latest_turn_only=True):
+        excluded_turn_indx = []
         inputs = trainer.unpack_batch(batch, self.use_cuda)
         src, tgt_in, tgt_out, turn_ids = \
             inputs['src'], inputs['tgt_in'], inputs['tgt_out'], inputs['turn_ids']
         bg = inputs.get('bg', None)
         src_mask = src.eq(constants.PAD_ID)
         bg_mask = bg.eq(constants.PAD_ID) if bg is not None else None
-
-        if not return_preds:
-            self.model.eval()
+        turn_size = src.size(1)
         batch_size = src.size(0)
         preds = self.model.sq2sq_model.sample(src, src_mask, turn_ids, top_p=top_p, bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level)
         preds, nll = preds
-        pred_seqs = [[self.dict.ind2tok[id_] for id_ in ids] for ids in preds] # unmap to tokens
+        if latest_turn_only:
+            excluded_turn_indx = [i for i in range(len(preds)) if (i + 1) % turn_size != 0]
+        pred_seqs = [[self.dict.ind2tok[id_] for id_ in ids] for i,  ids in enumerate(preds) if i not in excluded_turn_indx]
+        nll = [prob for i, prob in enumerate(nll) if i not in excluded_turn_indx]
         pred_seqs = util.prune_decoded_seqs(pred_seqs)
         return pred_seqs, preds, nll
