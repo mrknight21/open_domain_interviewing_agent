@@ -240,6 +240,12 @@ class InterviewerAgent(TorchGeneratorAgent):
             help='train or evaluation with a single full length lineage',
         )
         parser.add_argument(
+            '--all-rewards-global',
+            type='bool',
+            default=False,
+            help='consider all rewards as global rewards',
+        )
+        parser.add_argument(
             '--record-step-stats',
             type='bool',
             default=False,
@@ -261,6 +267,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         self.init_finetune = opt['init_finetune']
         self.use_master_baseline = opt['use_master_baseline']
         self.single_full_length_generation = opt['single_full_length_generation']
+        self.all_rewards_global = opt['all_rewards_global']
         super().__init__(opt, shared)
 
     @staticmethod
@@ -606,6 +613,8 @@ class InterviewerAgent(TorchGeneratorAgent):
         total_reward = []
         local_rewards_filters = {}
         local_rewards_tracker = {}
+        global_rewards = {}
+        local_rewards = {}
         gen_reward_index = []
         reward_tracker = {}
         if not self.history.rewards:
@@ -617,8 +626,13 @@ class InterviewerAgent(TorchGeneratorAgent):
             else:
                 gen_reward_index.append(list(range(content['dialogue_length'])[-len(content['ques_len']):]))
 
-        global_rewards = {name: content for name, content in self.history.rewards.items() if content['global']}
-        local_rewards = {name: content for name, content in self.history.rewards.items() if not content['global']}
+        if self.all_rewards_global:
+            for r_name, content in self.history.rewards.items():
+                global_rewards[r_name] = content
+                global_rewards[r_name]['global'] = True
+        else:
+            global_rewards = {name: content for name, content in self.history.rewards.items() if content['global']}
+            local_rewards = {name: content for name, content in self.history.rewards.items() if not content['global']}
 
         for r_name, r in local_rewards.items():
             master_raw_r = r['master']
@@ -637,28 +651,37 @@ class InterviewerAgent(TorchGeneratorAgent):
             self.record_local_metric(r_name + '_mean', AverageMetric.many([float(mean_gen_r)], [1]))
         weight = 1 / len(global_rewards)
         for r_name, r in global_rewards.items():
-            master_raw_r = r['master']
+            master_r = r['master']
             diverged_raw_r = r['diverged_rewards']
             is_global = r['global']
             required_normalise = r['required_normalise']
-            gen_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
+            raw_gen_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
+            gen_r = []
             if is_global:
-                for i, conv in enumerate(gen_r):
+                master_r = forward_average_discount(np.array([master_r]))[0].tolist()
+                for i, conv in enumerate(raw_gen_r):
+                    gen_r.append([])
                     if len(conv) > 0:
                         gen_r[i] = forward_average_discount(np.array([conv]))[0].tolist()
                     else:
                         gen_r[i] = np.array([])
-            if local_rewards_filters['diverged']:
+            if local_rewards_filters:
+                master_r = [r*local_rewards_filters['master'][i] for i, r in enumerate(master_r)]
                 for i, conv in enumerate(gen_r):
                     if len(conv) > 0:
                         gen_r[i] = [d*local_rewards_filters['diverged'][i][j] for j, d in enumerate(conv)]
             if required_normalise:
                 flat_gen_r = [r for conv in gen_r for r in conv]
+
+                if self.use_master_baseline:
+                    flat_gen_r += master_r
                 mean_gen_r = np.mean(flat_gen_r)
                 std_gen_r = np.std(flat_gen_r)
+            flat_raw_gen_r = [r for conv in raw_gen_r for r in conv]
+            mean_raw_gen_r = np.mean(flat_raw_gen_r)
             rewards = []
             reward_tracker[r_name] = []
-            for step in range(len(master_raw_r)):
+            for step in range(len(master_r)):
                 diverged_lineages = [(l.dialogues, gen_r[i], log_probs[i])
                                     for i, l in enumerate(self.diverged_dialogues.lineages)
                                     if log_probs[i]['log_probs'] and l.gen_start_index == step]
@@ -668,19 +691,16 @@ class InterviewerAgent(TorchGeneratorAgent):
                 dl_logprobs = [dl[2]['log_probs'] for dl in diverged_lineages]
                 dl_ques_len = [torch.tensor(dl[2]['ques_len']) for dl in diverged_lineages]
                 num_generated_turns = len(dl_logprobs[-1])
-                dl_rewards = [dl[1] for dl in diverged_lineages]
-                master_rs = master_raw_r[turns_count-num_generated_turns:turns_count]
-                master_filter = local_rewards_filters['master'][turns_count-num_generated_turns:turns_count]
-                _rewards = np.array([master_rs] + dl_rewards)
+                dl_rewards = np.array([dl[1] for dl in diverged_lineages])
+                master_rewards = np.array(master_r[turns_count - num_generated_turns:turns_count])
                 if required_normalise:
-                    _rewards = (_rewards - mean_gen_r) / std_gen_r
-                master_rs = _rewards[0]
-                diverged_rs = _rewards[1:]
+                    dl_rewards = (dl_rewards - mean_gen_r) / std_gen_r
+                    master_rewards = (master_rewards - mean_gen_r) / std_gen_r
                 #use master reward as baseline
                 if self.use_master_baseline:
-                    _reward = torch.tensor(diverged_rs - master_rs)
+                    _reward = torch.tensor(dl_rewards - master_rewards)
                 else:
-                    _reward = torch.tensor(diverged_rs)
+                    _reward = torch.tensor(dl_rewards)
                 # relative_reward = torch.tensor(dl_rewards)
                 if self.use_cuda:
                     _reward = _reward.cuda()
@@ -690,7 +710,8 @@ class InterviewerAgent(TorchGeneratorAgent):
                 reward_tracker[r_name].append(r.data)
             reward = torch.stack(rewards).mean()
             total_reward.append(reward*weight)
-        reinforcement_loss = torch.stack(total_reward).sum() * 10
+            self.record_local_metric(r_name + '_mean', AverageMetric.many([float(mean_raw_gen_r)], [1]))
+        reinforcement_loss = torch.stack(total_reward).sum() * 1
         if self.reinforcement_lambda != 1.0:
             total_loss = self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
         else:
