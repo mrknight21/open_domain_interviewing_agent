@@ -180,6 +180,7 @@ class Lineage(object):
         # indicate after which dialogue all dialogues are generated
         self.gen_start_index = len(self.dialogues)
         self.freeze = False
+        self.background_tokens = []
 
     def _update_dialogues(self, text, log_prob=None, reward=None, cache=None, ques_len=0):
         """

@@ -286,7 +286,8 @@ class InterviewerAgent(TorchGeneratorAgent):
         # Note that contants.SEP does not exist in the original teacher model.
         # It is a temporary measure ro fulfull the history delimiator requirement
         # , and will require to be replaced or removed before vectorization.
-        self.opt['delimiter'] = self.dict.sep_token
+        if hasattr(self.dict, 'sep_token'):
+            self.opt['delimiter'] = self.dict.sep_token
         history = self.history_class()(
             self.opt,
             maxlen=self.text_truncate,
@@ -295,7 +296,7 @@ class InterviewerAgent(TorchGeneratorAgent):
             p2_token=self.P2_TOKEN,
             dict_agent=self.dict,
         )
-        history.delimiter_tok = self.dict.sep_idx
+        history.delimiter_tok = self.dict[self.opt['delimiter']]
         self.diverged_dialogues = DialogueLineages()
         return history
 
@@ -605,7 +606,7 @@ class InterviewerAgent(TorchGeneratorAgent):
     def rl_train_step(self, batch):
         maxlen = self.question_truncate or 30
         pred_seqs, preds, nll = self.sample(batch, latest_turn_only=True)
-        text = [ " ".join(seq) for seq in pred_seqs]
+        text = [" ".join(seq) for seq in pred_seqs]
         retval = Output(text[:1], log_probs=nll[:1], episode_end=[batch.episode_end], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, nll[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
         return retval
 
@@ -752,8 +753,9 @@ class InterviewerAgent(TorchGeneratorAgent):
                 )
         preds = None
         maxlen = self.question_truncate or 30
-        preds, scores = self.predict(div_batch, latest_turn_only=True)
-        text = [ " ".join(seq) for seq in preds]
+        # preds, scores = self.predict(div_batch, latest_turn_only=True)
+        preds, s_preds, scores = self.sample(div_batch, latest_turn_only=True)
+        text = [" ".join(seq) for seq in preds]
         retval = Output(text[:1], log_probs=scores[:1], episode_end=[batch.episode_end], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, scores[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
         return retval
 
@@ -901,7 +903,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         pred_seqs = util.prune_decoded_seqs(pred_seqs)
         return pred_seqs, log_probs
 
-    def sample(self, batch, top_p=1, return_pair_level=False, latest_turn_only=True):
+    def sample(self, batch, top_p=1.0, return_pair_level=False, latest_turn_only=True):
         excluded_turn_indx = []
         inputs = trainer.unpack_batch(batch, self.use_cuda)
         src, tgt_in, tgt_out, turn_ids = \
