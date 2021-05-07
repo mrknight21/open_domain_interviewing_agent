@@ -2,19 +2,20 @@ from parlai_internal.agents.interviewer.interviewer import InterviewerAgent
 from parlai_internal.utilities.flow_lstm_util import constants
 from parlai.agents.hugging_face.gpt2 import Gpt2DictionaryAgent, GPT2Decoder, HFGPT2Model
 from parlai.core.torch_agent import Optional, Batch, Output
+import parlai.utils.logging as logging
 from parlai.core.opt import Opt
 from parlai.core.params import ParlaiParser
 from parlai.utils.misc import warn_once
 
-from typing import List
+from typing import TypeVar, List, Dict, Optional, Tuple, Set, Iterable
 import copy
 
 SPECIAL_TOKENS = {"bos_token": "<bos>", "eos_token": "<eos>", "pad_token": "<pad>",
-                  "QUESST": constants.QUESST, "QUESEN": constants.QUESEN,
-                  "TITLEST": constants.TITLEST, "TITLEEN": constants.TITLEEN,
-                  "SECST": constants.SECST, "SECEN": constants.SECEN,
-                  "BGST": constants.BGST, "BGEN": constants.BGEN,
-                  "ANSST": constants.ANSST, "ANSEN": constants.ANSEN}
+                  "additional_special_tokens": [constants.QUESST, constants.QUESEN,
+                                                constants.TITLEST, constants.TITLEEN,
+                                                constants.SECST, constants.SECEN,
+                                                constants.BGST, constants.BGEN,
+                                                constants.ANSST, constants.ANSEN]}
 
 NO_OP = "x"
 
@@ -88,8 +89,8 @@ class GptInterviewerAgent(InterviewerAgent):
             help="Add start tokens when finetuning.",
         )
         parser.set_defaults(
-            text_truncate=768,
-            label_truncate=256,
+            text_truncate=738,
+            label_truncate=30,
             dict_maxexs=0,  # skip building dictionary
         )
         super().add_cmdline_args(parser, partial_opt=partial_opt)
@@ -170,6 +171,14 @@ class GptInterviewerAgent(InterviewerAgent):
             obs.force_set('eval_labels', labels_with_special_tokens)
         return obs
 
+    def _set_label_vec(self, obs, add_start, add_end, truncate):
+        """
+        Set the 'labels_vec' field in the observation.
+
+        Useful to override to change vectorization behavior
+        """
+        obs = super(InterviewerAgent, self)._set_label_vec(obs, add_start, add_end, truncate)
+        return obs
 
     def get_preprocessed_batches(self, obs_batch, valid_inds):
         batch = super(InterviewerAgent, self).batchify(obs_batch)
@@ -179,24 +188,60 @@ class GptInterviewerAgent(InterviewerAgent):
         history = self.history
         if not dialogues:
             dialogues = history.dialogues
-        background_tokens = history.background_tokens
-        if not background_tokens:
+        background_string = history.background_string
+        if not background_string:
+            background_string = ""
             if history.title:
-                background_tokens += [constants.TITLEST] + self.dict.tokenizer.tokenize(history.title) + [constants.TITLEEN]
-            if history.background:
-                background_tokens += [constants.BGST] + self.dict.tokenizer.tokenize(history.background)[:constants.MAX_BACKGROUND] + [constants.BGEN]
+                background_string += constants.TITLEST + history.title + constants.TITLEEN
             if history.section_title:
-                background_tokens += [constants.SECST] + self.dict.tokenizer.tokenize(history.section_title) + [constants.SECEN]
-            self.history.background_tokens = background_tokens
+                background_string += constants.SECST + history.section_title + constants.SECEN
+            if history.background:
+                background_string += constants.BGST + " ".join(history.background.split(" ")[:constants.MAX_BACKGROUND]) + constants.BGEN
+            self.history.background_string = background_string
         qas = []
         if len(dialogues) > 0:
             for turn in dialogues:
-                background_tokens += [constants.QUESST] + turn.question + [constants.QUESEN]
-                background_tokens += [constants.ANSST] + turn.answer + [constants.ANSEN]
+                background_string += constants.QUESST + turn.question + constants.QUESEN
+                background_string += constants.ANSST + turn.answer + constants.ANSEN
                 qas.append((turn.question, turn.answer))
-        strings_to_tokenize = " ".join(background_tokens)
-        text_vec = self.dict.tokenizer.text2vec(strings_to_tokenize)
+        text_vec = self.dict.txt2vec(background_string)
         return text_vec
 
     def _encoder_input(self, batch):
         return (batch.text_vec,)
+
+    def _model_input(self, batch):
+        return batch.text_vec
+
+    def build_criterion(self):
+        return super(InterviewerAgent, self).build_criterion()
+
+    def sample(self, batch, return_pair_level=False, latest_turn_only=True, train=True):
+        self.opt['inference'] = 'nucleus'
+        if batch.text_vec is None and batch.image is None:
+            return
+        if batch.text_vec is not None:
+            bsz = batch.text_vec.size(0)
+        else:
+            bsz = len(batch.image)
+        maxlen = self.label_truncate or 256
+        if train:
+            self.opt['topp'] = 0.9
+            self.beam_min_length = 0
+        beam_preds_scores, beams = self._generate(batch, self.beam_size, maxlen)
+        preds, scores = zip(*beam_preds_scores)
+        self._add_generation_metrics(batch, preds)
+
+        # bsz x beamsize
+        beam_texts: List[List[Tuple[str, float]]] = []
+        for beam in beams:
+            beam_texts.append([])
+            for tokens, score in beam.get_rescored_finished():
+                try:
+                    beam_texts[-1].append((self._v2t(tokens), score.item()))
+                except KeyError:
+                    logging.error("Decoding error: %s", tokens)
+                    continue
+        text = [self._v2t(p) for p in preds] if preds is not None else None
+        preds = [[int(id.detach().cpu())  for id in cov if id not in [self.START_IDX, self.END_IDX]] for cov in preds]
+        return preds, text, scores

@@ -518,12 +518,12 @@ class InterviewerAgent(TorchGeneratorAgent):
             labels=inputs.get('tgt_text', None),
             text_lengths=src_text_numb,
             observations=obs_batch,
-            episode_end= obs_batch[0]['episode_done'],
         )
         return batch
 
 
     def batchify(self, org_batch, sort=False):
+        episode_done = org_batch[0]['episode_done']
         batch = Batch(batchsize=0, episode_done=org_batch[0]['episode_done'], valid_indices=list(range(len(org_batch))))
         if batch.episode_done or len(org_batch) == 0:
             return batch
@@ -536,6 +536,8 @@ class InterviewerAgent(TorchGeneratorAgent):
             div_batch, index_batch_id_map = self.unpacking_obs_batcch_with_divergence(org_batch)
             div_valid_inds = [i for i, b in enumerate(div_batch) if self.is_valid(b)]
             master_batch['diverged_batch'] = self.get_preprocessed_batches(div_batch, div_valid_inds)
+            master_batch['diverged_batch']['episode_end'] = episode_done
+        master_batch['episode_end'] = episode_done
         return master_batch
 
     #This function is for stress test before an intensive training is carried out.
@@ -605,9 +607,8 @@ class InterviewerAgent(TorchGeneratorAgent):
 
     def rl_train_step(self, batch):
         maxlen = self.question_truncate or 30
-        pred_seqs, preds, nll = self.sample(batch, latest_turn_only=True)
-        text = [" ".join(seq) for seq in pred_seqs]
-        retval = Output(text[:1], log_probs=nll[:1], episode_end=[batch.episode_end], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, nll[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
+        preds, text, nll = self.sample(batch, latest_turn_only=True)
+        retval = Output(text[:1], log_probs=nll[:1], episode_end=[batch['episode_end']], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, nll[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
         return retval
 
     def reinforcement_backward_step(self):
@@ -903,7 +904,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         pred_seqs = util.prune_decoded_seqs(pred_seqs)
         return pred_seqs, log_probs
 
-    def sample(self, batch, top_p=1.0, return_pair_level=False, latest_turn_only=True):
+    def sample(self, batch, return_pair_level=False, latest_turn_only=True):
         excluded_turn_indx = []
         inputs = trainer.unpack_batch(batch, self.use_cuda)
         src, tgt_in, tgt_out, turn_ids = \
@@ -915,7 +916,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         batch_size = src.size(0)
         if latest_turn_only:
             excluded_turn_indx = [i for i in range(batch_size*turn_size) if (i + 1) % turn_size != 0]
-        preds = self.model.sq2sq_model.sample(src, src_mask, turn_ids, top_p=top_p, bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level, excluded_turn_indx= excluded_turn_indx)
+        preds = self.model.sq2sq_model.sample(src, src_mask, turn_ids, top_p=self.opt['topp'], bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level, excluded_turn_indx= excluded_turn_indx)
         preds, nll = preds
         pred_seqs = [[self.dict.ind2tok[id_] for id_ in ids] for i,  ids in enumerate(preds)]
         pred_seqs = util.prune_decoded_seqs(pred_seqs)
