@@ -217,6 +217,7 @@ class SelfBleuScorer(BasedLocalRewardScorer):
 
     def reward(self, conversations, master_history=None, last_action=None, agent_dictionary=None):
         master_conv = None
+        weight = (0.25, 0.25, 0.25, 0.25)
         if master_history and last_action:
             master_conv = master_history.dialogues
             master_conv[-1].answer = last_action['text']
@@ -250,8 +251,10 @@ class SelfBleuScorer(BasedLocalRewardScorer):
                         if resonse in prior_resonse:
                             score = 0
                         else:
-                            _, _, f1_score = max([F1Metric._prec_recall_f1_score(hypothesis, ref) for ref in refs])
-                            score = 1 - f1_score
+                            # _, _, score = max([F1Metric._prec_recall_f1_score(hypothesis, ref) for ref in refs])
+                            score = nltk.translate.bleu_score.sentence_bleu(refs, hypothesis, weight,
+                                                                    smoothing_function=SmoothingFunction().method1)
+                            score = 1 - score
                     dialogue_reward.append(score)
             if master_conv and i == 0:
                 master_rewards = dialogue_reward

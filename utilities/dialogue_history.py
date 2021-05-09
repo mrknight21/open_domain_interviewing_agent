@@ -55,6 +55,7 @@ class DialogueHistory(History):
         self.section_title = None
         self.rewards = None
         self.context_token_weights = None
+        self.background_string = None
 
     def reset(self):
         """
@@ -71,6 +72,7 @@ class DialogueHistory(History):
         self.rewards = None
         self.context_token_weights = None
         self.dialogues_nll_loss = []
+        self.background_tokens = []
 
     def _update_dialogues(self, text, log_prob=None, reward=None, cache=None, ques_len=0):
         """
@@ -180,7 +182,7 @@ class Lineage(object):
         # indicate after which dialogue all dialogues are generated
         self.gen_start_index = len(self.dialogues)
         self.freeze = False
-        self.background_tokens = []
+
 
     def _update_dialogues(self, text, log_prob=None, reward=None, cache=None, ques_len=0):
         """
