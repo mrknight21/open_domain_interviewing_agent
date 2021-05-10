@@ -37,6 +37,7 @@ class DefaultTeacher(ParlAIDialogTeacher):
         Get a specific example from the dataset.
         """
         ex = self.episodes[episode_idx][entry_idx]
+        is_last_episode = episode_idx == len(self.episodes) -1
         context_token_weights = ex.get("context_token_weights", None)
         if context_token_weights:
             context_token_weights = eval(context_token_weights)
@@ -77,7 +78,8 @@ class DefaultTeacher(ParlAIDialogTeacher):
             'section_title': ex['section_title'],
             'title': ex['title'],
             'character_start_end': char_start_end,
-            'context_token_weights': context_token_weights
+            'context_token_weights': context_token_weights,
+            'is_last_episode': is_last_episode
         }
         return action
 
