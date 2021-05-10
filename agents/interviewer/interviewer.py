@@ -257,6 +257,12 @@ class InterviewerAgent(TorchGeneratorAgent):
             default=False,
             help='train or evaluation with a single full length lineage',
         )
+        parser.add_argument(
+            '--add-master-question-answer-lineage',
+            type='bool',
+            default=False,
+            help='train or evaluation with a single full length lineage',
+        )
 
     def __init__(self, opt: Opt, shared=None):
         self.rl_mode = opt['reinforcement_learning']
@@ -268,6 +274,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         self.use_master_baseline = opt['use_master_baseline']
         self.single_full_length_generation = opt['single_full_length_generation']
         self.all_rewards_global = opt['all_rewards_global']
+        self.add_master_question_answer_lineage = opt['add_master_question_answer_lineage']
         super().__init__(opt, shared)
 
     @staticmethod
@@ -312,17 +319,19 @@ class InterviewerAgent(TorchGeneratorAgent):
             return None
         model_output = observation['model_answers']
         cnt = len(model_output)
+        offset_adjust = -1
         for i, retval in enumerate(model_output):
             text = retval['text']
             cache = self.diverged_dialogues.get_cache(retval)
             reward = retval['reward_items']
-            if i == 0 and not self.single_full_length_generation:
+            if i == 0 and not self.single_full_length_generation and self.add_master_question_answer_lineage:
                 self.diverged_dialogues.add_lineage(text, self.history, message=retval, reward=reward)
+                offset_adjust += 1
             elif i != 0:
                 if not self.is_training and i + 1 == cnt:
                     self.diverged_dialogues.lineages[-1]._update_dialogues(text, cache=cache, reward=reward)
                     continue
-                self.diverged_dialogues.lineages[i]._update_dialogues(text, cache=cache, reward=reward)
+                self.diverged_dialogues.lineages[i+offset_adjust]._update_dialogues(text, cache=cache, reward=reward)
         for lineage in self.diverged_dialogues.lineages:
             if not lineage.freeze:
                 # freeze lineage that reach the exploration limits
@@ -622,6 +631,8 @@ class InterviewerAgent(TorchGeneratorAgent):
         if not self.history.rewards:
             return total_reward
         log_probs = self.diverged_dialogues.get_log_probs()
+        if not self.add_master_question_answer_lineage:
+            gen_reward_index.append([])
         for content in log_probs:
             if len(content['ques_len']) == 0:
                 gen_reward_index.append([])
