@@ -72,7 +72,7 @@ class DialogueHistory(History):
         self.rewards = None
         self.context_token_weights = None
         self.dialogues_nll_loss = []
-        self.background_tokens = []
+        self.background_string = None
 
     def _update_dialogues(self, text, log_prob=None, reward=None, cache=None, ques_len=0):
         """

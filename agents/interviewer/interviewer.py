@@ -690,6 +690,8 @@ class InterviewerAgent(TorchGeneratorAgent):
                     flat_gen_r += master_r
                 mean_gen_r = np.mean(flat_gen_r)
                 std_gen_r = np.std(flat_gen_r)
+            if std_gen_r == 0:
+                continue
             flat_raw_gen_r = [r for conv in raw_gen_r for r in conv]
             mean_raw_gen_r = np.mean(flat_raw_gen_r)
             rewards = []
@@ -729,8 +731,11 @@ class InterviewerAgent(TorchGeneratorAgent):
             total_loss = self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
         else:
             total_loss = reinforcement_loss
-        self.backward(total_loss)
-        self.update_params()
+        try:
+            self.backward(total_loss)
+            self.update_params()
+        except:
+            pass
         self.record_local_metric('total_loss', AverageMetric.many([float(total_loss.detach().cpu())], [1]))
         self.record_local_metric('reward_loss', AverageMetric.many([float(reinforcement_loss.detach().cpu())], [1]))
 

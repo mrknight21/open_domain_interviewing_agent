@@ -216,6 +216,31 @@ class GptInterviewerAgent(InterviewerAgent):
     def build_criterion(self):
         return super(InterviewerAgent, self).build_criterion()
 
+    def rl_eval_step(self, batch):
+        div_batch = batch.get('diverged_batch', None)
+        if not div_batch:
+            div_batch = batch
+        token_losses = None
+        if batch.label_vec is not None:
+            # calculate loss on targets with teacher forcing
+            loss, model_output = self.compute_loss(batch, return_output=True)
+            if self.output_token_losses:
+                token_losses = self._construct_token_losses(
+                    batch.label_vec, model_output
+                )
+        preds = None
+        maxlen = self.question_truncate or 30
+        preds, text, scores = self.predict(div_batch, latest_turn_only=True)
+        # preds, text, scores = self.sample(div_batch, latest_turn_only=True)
+        retval = Output(text[:1], log_probs=scores[:1], episode_end=[batch.episode_end], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, scores[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
+        return retval
+
+    def rl_train_step(self, batch):
+        maxlen = self.question_truncate or 30
+        preds, text, nll = self.sample(batch, latest_turn_only=True)
+        retval = Output(text[:1], log_probs=nll[:1], episode_end=[batch['episode_end']], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, nll[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
+        return retval
+
     def sample(self, batch, return_pair_level=False, latest_turn_only=True, train=True):
         self.opt['inference'] = 'nucleus'
         if batch.text_vec is None and batch.image is None:
@@ -244,4 +269,31 @@ class GptInterviewerAgent(InterviewerAgent):
                     continue
         text = [self._v2t(p) for p in preds] if preds is not None else None
         preds = [[int(id.detach().cpu())  for id in cov if id not in [self.START_IDX, self.END_IDX]] for cov in preds]
+        return preds, text, scores
+
+    def predict(self, batch, beam_size=1, return_pair_level=False, latest_turn_only=False):
+        self.opt['inference'] = 'greedy'
+        if batch.text_vec is None and batch.image is None:
+            return
+        if batch.text_vec is not None:
+            bsz = batch.text_vec.size(0)
+        else:
+            bsz = len(batch.image)
+        maxlen = self.label_truncate or 256
+        beam_preds_scores, beams = self._generate(batch, self.beam_size, maxlen)
+        preds, scores = zip(*beam_preds_scores)
+        self._add_generation_metrics(batch, preds)
+
+        # bsz x beamsize
+        beam_texts: List[List[Tuple[str, float]]] = []
+        for beam in beams:
+            beam_texts.append([])
+            for tokens, score in beam.get_rescored_finished():
+                try:
+                    beam_texts[-1].append((self._v2t(tokens), score.item()))
+                except KeyError:
+                    logging.error("Decoding error: %s", tokens)
+                    continue
+        text = [self._v2t(p) for p in preds] if preds is not None else None
+        preds = [[int(id.detach().cpu()) for id in cov if id not in [self.START_IDX, self.END_IDX]] for cov in preds]
         return preds, text, scores
