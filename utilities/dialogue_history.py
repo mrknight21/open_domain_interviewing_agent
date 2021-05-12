@@ -13,7 +13,7 @@ class DialogueTurn(object):
     complete: bool
     generated: bool
 
-    def __init__(self, question_text, answer_text=None, log_prob=None, reward=None, cache=None, ques_len=0):
+    def __init__(self, question_text, answer_text=None, log_prob=None, reward=None, cache=None, ques_len=0, greedy_output=None):
         self.question = question_text
         self.ques_len = ques_len
         self.answer = answer_text
@@ -22,13 +22,26 @@ class DialogueTurn(object):
         self.cache = cache
         self.generated = False
         self.complete = False
+        self.greedy_question = None
+        self.greedy_answer = None
+        self.greedy_cache = None
+        self.greedy_reward = None
+        if greedy_output:
+            if greedy_output.get('question', None):
+                self.greedy_question = greedy_output['question']
+            if greedy_output.get('answer', None):
+                self.greedy_answer = greedy_output['answer']
+            if greedy_output.get('cache', None):
+                self.greedy_cache = greedy_output['cache']
+            if greedy_output.get('reward', None):
+                self.greedy_reward = greedy_output['reward']
         if log_prob is not None:
             self.generated = True
         if self.question and self.answer:
             self.complete = True
 
 
-    def update(self, answer_text=None, log_prob=None, reward=None, cache=None, ques_len=0):
+    def update(self, answer_text=None, log_prob=None, reward=None, cache=None, ques_len=0, greedy_output= None):
         if answer_text:
             self.answer = answer_text
             self.complete = True
@@ -41,7 +54,15 @@ class DialogueTurn(object):
             self.cache = cache
         if ques_len:
             self.ques_len = ques_len
-
+        if greedy_output:
+            if greedy_output.get('question', None):
+                self.greedy_question = greedy_output['question']
+            if greedy_output.get('answer', None):
+                self.greedy_answer = greedy_output['answer']
+            if greedy_output.get('cache', None):
+                self.greedy_cache = greedy_output['cache']
+            if greedy_output.get('reward', None):
+                self.greedy_reward = greedy_output['reward']
 
 class DialogueHistory(History):
     def __init__(self, opt, **kwargs):
@@ -184,16 +205,16 @@ class Lineage(object):
         self.freeze = False
 
 
-    def _update_dialogues(self, text, log_prob=None, reward=None, cache=None, ques_len=0):
+    def _update_dialogues(self, text, log_prob=None, reward=None, cache=None, ques_len=0, greedy_output=None):
         """
         Update the history dialogue with te given observation.
         dialogue is a tuple with index 0 from the others and the index 1 from self
         :param text: the current observed utterance text
         """
 
-        dialogue = DialogueTurn(question_text=text, log_prob=log_prob, reward=reward, cache=cache, ques_len=ques_len)
+        dialogue = DialogueTurn(question_text=text, log_prob=log_prob, reward=reward, cache=cache, ques_len=ques_len, greedy_output=greedy_output)
         if self.dialogues and not self.dialogues[-1].complete:
-            self.dialogues[-1].update(text, log_prob=log_prob, reward=reward, cache=cache, ques_len=ques_len)
+            self.dialogues[-1].update(text, log_prob=log_prob, reward=reward, cache=cache, ques_len=ques_len, greedy_output=greedy_output)
         else:
             self.dialogues.append(dialogue)
 
@@ -231,7 +252,7 @@ class DialogueLineages(object):
             return len([l for l in self.lineages if not l.freeze])
         return len(self.lineages)
 
-    def add_lineage(self, text, history, message=None, log_prob=None, reward=None, cache=None, ques_len=0):
+    def add_lineage(self, text, history, message=None, log_prob=None, reward=None, cache=None, ques_len=0, greedy_output=None):
         new_lineage = Lineage(history.dialogues)
         if message:
             # create new lineage from ground truth answer
@@ -239,7 +260,7 @@ class DialogueLineages(object):
             log_prob = message.get('log_prob', None)
             reward = message.get('reward_items', None)
             text = message.get('text', "")
-        new_lineage._update_dialogues(text, log_prob=log_prob, reward=reward, cache=cache, ques_len=ques_len)
+        new_lineage._update_dialogues(text, log_prob=log_prob, reward=reward, cache=cache, ques_len=ques_len, greedy_output=greedy_output)
         self.lineages.appendleft(new_lineage)
 
     def get_dialogues(self, active_only=False):
@@ -260,4 +281,3 @@ class DialogueLineages(object):
             log_probs = [d.log_prob for d in l.dialogues if d.generated]
             generated_log_probs.append({'dialogue_length': dialogue_length, 'log_probs':log_probs, 'ques_len':ques_len})
         return generated_log_probs
-
