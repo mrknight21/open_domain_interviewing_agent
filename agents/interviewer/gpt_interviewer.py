@@ -9,6 +9,7 @@ from parlai.utils.misc import warn_once
 
 from typing import TypeVar, List, Dict, Optional, Tuple, Set, Iterable
 import copy
+import torch
 
 SPECIAL_TOKENS = {"bos_token": "<bos>", "eos_token": "<eos>", "pad_token": "<pad>",
                   "additional_special_tokens": [constants.QUESST, constants.QUESEN,
@@ -238,7 +239,15 @@ class GptInterviewerAgent(InterviewerAgent):
     def rl_train_step(self, batch):
         maxlen = self.question_truncate or 30
         preds, text, nll = self.sample(batch, latest_turn_only=True)
-        retval = Output(text[:1], log_probs=nll[:1], episode_end=[batch['episode_end']], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, nll[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
+        if self.rl_baseline_method == "self_critic":
+            g_preds, g_text, g_scores = self.predict(batch, latest_turn_only=True, no_grad=True)
+            retval = Output(text[:1], log_probs=nll[:1], episode_end=[batch['episode_end']],
+                            ques_len=[len(preds[0]) - 1],
+                            diverged_outputs=[[(t, nll[i], len(preds[i]) - 1) for i, t in enumerate(text[1:])]],
+                            greedy_master_output=g_text[:1],
+                            greedy_output=[[t for t in g_text[1:]]])
+        else:
+            retval = Output(text[:1], log_probs=nll[:1], episode_end=[batch['episode_end']], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, nll[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
         return retval
 
     def sample(self, batch, return_pair_level=False, latest_turn_only=True, train=True):
@@ -251,7 +260,7 @@ class GptInterviewerAgent(InterviewerAgent):
             bsz = len(batch.image)
         maxlen = self.label_truncate or 256
         if train:
-            self.opt['topp'] = 0.9
+            self.opt['topp'] = 1.0
             self.beam_min_length = 0
         beam_preds_scores, beams = self._generate(batch, self.beam_size, maxlen)
         preds, scores = zip(*beam_preds_scores)
@@ -271,7 +280,7 @@ class GptInterviewerAgent(InterviewerAgent):
         preds = [[int(id.detach().cpu())  for id in cov if id not in [self.START_IDX, self.END_IDX]] for cov in preds]
         return preds, text, scores
 
-    def predict(self, batch, beam_size=1, return_pair_level=False, latest_turn_only=False):
+    def predict(self, batch, beam_size=1, return_pair_level=False, latest_turn_only=False, no_grad=True):
         self.opt['inference'] = 'greedy'
         if batch.text_vec is None and batch.image is None:
             return
@@ -280,10 +289,13 @@ class GptInterviewerAgent(InterviewerAgent):
         else:
             bsz = len(batch.image)
         maxlen = self.label_truncate or 256
-        beam_preds_scores, beams = self._generate(batch, self.beam_size, maxlen)
+        if no_grad:
+            with torch.no_grad():
+                beam_preds_scores, beams = self._generate(batch, self.beam_size, maxlen)
+        else:
+            beam_preds_scores, beams = self._generate(batch, self.beam_size, maxlen)
         preds, scores = zip(*beam_preds_scores)
         self._add_generation_metrics(batch, preds)
-
         # bsz x beamsize
         beam_texts: List[List[Tuple[str, float]]] = []
         for beam in beams:

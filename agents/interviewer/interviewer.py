@@ -196,12 +196,6 @@ class InterviewerAgent(TorchGeneratorAgent):
             default=False,
             help='init pretrained teacher model with finetuned mode',
         )
-        parser.add_argument(
-            '--use-master-baseline',
-            type='bool',
-            default=False,
-            help='use reward from the master lineage as the baseline',
-        )
         # miscellaneous arguments
         parser.add_argument(
             '--reinforcement-learning',
@@ -253,12 +247,6 @@ class InterviewerAgent(TorchGeneratorAgent):
             help='record the reward mean for each diverge step',
         )
         parser.add_argument(
-            '--sampling-generation',
-            type='bool',
-            default=False,
-            help='train or evaluation with a single full length lineage',
-        )
-        parser.add_argument(
             '--add-master-question-answer-lineage',
             type='bool',
             default=False,
@@ -270,6 +258,12 @@ class InterviewerAgent(TorchGeneratorAgent):
             default=False,
             help='cache and save the dialogue text and reward of the evaluation',
         )
+        parser.add_argument(
+            '--rl-baseline-method',
+            choices={'no_baseline', 'master', 'self_critic'},
+            default='no_baseline',
+            help='choose the baseline strategy',
+        )
 
     def __init__(self, opt: Opt, shared=None):
         self.rl_mode = opt['reinforcement_learning']
@@ -278,7 +272,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         self.reinforcement_lambda = opt['reinforcement_lambda']
         self.question_truncate = opt['question_truncate']
         self.init_finetune = opt['init_finetune']
-        self.use_master_baseline = opt['use_master_baseline']
+        self.rl_baseline_method = opt['rl_baseline_method']
         self.single_full_length_generation = opt['single_full_length_generation']
         self.all_rewards_global = opt['all_rewards_global']
         self.add_master_question_answer_lineage = opt['add_master_question_answer_lineage']
@@ -327,20 +321,24 @@ class InterviewerAgent(TorchGeneratorAgent):
         if 'model_answers' not in observation:
             return None
         model_output = observation['model_answers']
+        g_model_outputs = observation.get('g_model_answers', None)
         cnt = len(model_output)
         offset_adjust = -1
         for i, retval in enumerate(model_output):
             text = retval['text']
             cache = self.diverged_dialogues.get_cache(retval)
             reward = retval['reward_items']
+            greedy_output = None
+            if g_model_outputs:
+                greedy_output = {'answer': g_model_outputs[i]['text'], 'cache': self.diverged_dialogues.get_cache(g_model_outputs[i]), 'reward': g_model_outputs[i]['reward_items']}
             if i == 0 and not self.single_full_length_generation and self.add_master_question_answer_lineage:
-                self.diverged_dialogues.add_lineage(text, self.history, message=retval, reward=reward)
+                self.diverged_dialogues.add_lineage(text, self.history, message=retval, reward=reward, greedy_output=greedy_output)
                 offset_adjust += 1
             elif i != 0:
                 if not self.is_training and i + 1 == cnt:
-                    self.diverged_dialogues.lineages[-1]._update_dialogues(text, cache=cache, reward=reward)
+                    self.diverged_dialogues.lineages[-1]._update_dialogues(text, cache=cache, reward=reward, greedy_output=greedy_output)
                     continue
-                self.diverged_dialogues.lineages[i+offset_adjust]._update_dialogues(text, cache=cache, reward=reward)
+                self.diverged_dialogues.lineages[i+offset_adjust]._update_dialogues(text, cache=cache, reward=reward, greedy_output=greedy_output)
         for lineage in self.diverged_dialogues.lineages:
             if not lineage.freeze:
                 # freeze lineage that reach the exploration limits
@@ -359,18 +357,27 @@ class InterviewerAgent(TorchGeneratorAgent):
         :return: Update the diverged_dialogues object
         """
         if not self.single_full_length_generation or len(self.diverged_dialogues.lineages) == 0:
+            greedy_output = None
+            if self_message.get("greedy_master_output", None):
+                greedy_output = {"question": self_message.get("greedy_master_output")}
             self.diverged_dialogues.add_lineage(self_message["text"], self.history,
                                                 log_prob=self_message.get("log_probs", None),
-                                                ques_len=self_message.get("ques_len", None))
+                                                ques_len=self_message.get("ques_len", None),
+                                                greedy_output=greedy_output)
         model_outputs = self_message['diverged_outputs']
+        greedy_questions = self_message.get('greedy_output', None)
         cnt = len(model_outputs)
         for i, (text, logprob, ques_len) in enumerate(model_outputs):
+            greedy_output = None
+            if greedy_questions:
+                greedy_output = {"question": greedy_questions[i]}
             if not self.is_training and i+1==cnt:
-                self.diverged_dialogues.lineages[-1]._update_dialogues(text, log_prob=logprob,
-                                                                                  ques_len=ques_len)
+                self.diverged_dialogues.lineages[-1]._update_dialogues(text, log_prob=logprob, ques_len=ques_len,
+                                                                       greedy_output=greedy_output)
                 continue
             lineage_index = i + 1
-            self.diverged_dialogues.lineages[lineage_index]._update_dialogues(text, log_prob=logprob, ques_len=ques_len)
+            self.diverged_dialogues.lineages[lineage_index]._update_dialogues(text, log_prob=logprob, ques_len=ques_len,
+                                                                              greedy_output=greedy_output)
 
 
     @classmethod
@@ -625,12 +632,22 @@ class InterviewerAgent(TorchGeneratorAgent):
                 if self.reinforcement_lambda != 0.0:
                     return self.rl_train_step(div_batch)
             else:
-                return self.history.dialogues_nll_loss.append(self.compute_loss(batch))
+                return super().train_step(batch)
 
     def rl_train_step(self, batch):
         maxlen = self.question_truncate or 30
-        preds, text, nll = self.sample(batch, latest_turn_only=True)
-        retval = Output(text[:1], log_probs=nll[:1], episode_end=[batch['episode_end']], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, nll[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
+        pred_seqs, preds, nll = self.sample(batch, latest_turn_only=True)
+        text = [" ".join(seq) for seq in pred_seqs]
+        if self.rl_baseline_method == "self_critic":
+            g_pred_seqs, g_log_probs = self.predict(batch, latest_turn_only=True, no_grad=True)
+            g_text = [" ".join(seq) for seq in g_pred_seqs]
+            retval = Output(text[:1], log_probs=nll[:1], episode_end=[batch['episode_end']],
+                            ques_len=[len(preds[0]) - 1],
+                            diverged_outputs=[[(t, nll[i], len(preds[i]) - 1) for i, t in enumerate(text[1:])]],
+                            greedy_master_output=g_text[:1],
+                            greedy_output=[[t for t in g_text[1:]]])
+        else:
+            retval = Output(text[:1], log_probs=nll[:1], episode_end=[batch['episode_end']], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, nll[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
         return retval
 
     def reinforcement_backward_step(self):
@@ -642,12 +659,11 @@ class InterviewerAgent(TorchGeneratorAgent):
         gen_reward_index = []
         reward_tracker = {}
         reinforcement_loss = 0
+        use_greed_baseline = self.rl_baseline_method == "self_critic"
         if not self.history.rewards and not self.history.dialogues_nll_loss:
             return total_reward
         if self.reinforcement_lambda != 0.0:
             log_probs = self.diverged_dialogues.get_log_probs()
-            if not self.add_master_question_answer_lineage:
-                gen_reward_index.append([])
             for content in log_probs:
                 if len(content['ques_len']) == 0:
                     gen_reward_index.append([])
@@ -665,44 +681,71 @@ class InterviewerAgent(TorchGeneratorAgent):
             for r_name, r in local_rewards.items():
                 master_raw_r = r['master']
                 diverged_raw_r = r['diverged_rewards']
+                greedy_raw_r = r.get('greedy_rewards', None)
+                if not self.add_master_question_answer_lineage:
+                    diverged_raw_r = diverged_raw_r[1:]
+                    if greedy_raw_r:
+                        greedy_raw_r = greedy_raw_r[1:]
                 gen_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
                 mean_gen_r = np.mean([r for conv in gen_r for r in conv])
                 if not local_rewards_filters:
                     local_rewards_filters = {"master": master_raw_r, "diverged": diverged_raw_r}
+                    if use_greed_baseline:
+                        local_rewards_filters['greedy'] = greedy_raw_r
                 else:
                     for i, r in enumerate(master_raw_r):
                         local_rewards_filters["master"][i] = r * local_rewards_filters["master"][i]
                     for i, conv in enumerate(diverged_raw_r):
                         for j, r in enumerate(conv):
                             local_rewards_filters["diverged"][i][j] = local_rewards_filters["diverged"][i][j] * r
+                            if use_greed_baseline:
+                                local_rewards_filters['greedy'][i][j] = local_rewards_filters['greedy'][i][j] * greedy_raw_r[i][j]
                 local_rewards_tracker[r_name] = mean_gen_r
                 self.record_local_metric(r_name + '_mean', AverageMetric.many([float(mean_gen_r)], [1]))
             weight = 1 / len(global_rewards)
             for r_name, r in global_rewards.items():
                 master_r = r['master']
                 diverged_raw_r = r['diverged_rewards']
-                is_global = r['global']
+                greedy_raw_r = r.get('greedy_rewards', None)
+                if not self.add_master_question_answer_lineage:
+                    diverged_raw_r = diverged_raw_r[1:]
+                    if greedy_raw_r:
+                        greedy_raw_r = greedy_raw_r[1:]
+                raw_greed_gen_r = []
                 required_normalise = r['required_normalise']
                 raw_gen_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
+                if greedy_raw_r:
+                    raw_greed_gen_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in
+                                    enumerate(greedy_raw_r)]
                 gen_r = []
-                if is_global:
-                    master_r = forward_average_discount(np.array([master_r]))[0].tolist()
-                    for i, conv in enumerate(raw_gen_r):
-                        gen_r.append([])
+                greed_gen_r = []
+                master_r = forward_average_discount(np.array([master_r]))[0].tolist()
+                for i, conv in enumerate(raw_gen_r):
+                    gen_r.append([])
+                    if len(conv) > 0:
+                        gen_r[i] = forward_average_discount(np.array([conv]))[0].tolist()
+                    else:
+                        gen_r[i] = []
+                    if use_greed_baseline:
+                        greed_gen_r.append([])
                         if len(conv) > 0:
-                            gen_r[i] = forward_average_discount(np.array([conv]))[0].tolist()
+                            greed_gen_r[i] = forward_average_discount(np.array([raw_greed_gen_r[i]]))[0].tolist()
                         else:
-                            gen_r[i] = np.array([])
+                            greed_gen_r[i] = []
                 if local_rewards_filters:
                     master_r = [r*local_rewards_filters['master'][i] for i, r in enumerate(master_r)]
                     for i, conv in enumerate(gen_r):
                         if len(conv) > 0:
                             gen_r[i] = [d*local_rewards_filters['diverged'][i][j] for j, d in enumerate(conv)]
+                            if use_greed_baseline:
+                                greed_gen_r[i] = [d*local_rewards_filters['greedy'][i][j] for j, d in enumerate(greed_gen_r[i])]
+                std_gen_r = 0
                 if required_normalise:
                     flat_gen_r = [r for conv in gen_r for r in conv]
-
-                    if self.use_master_baseline:
+                    if self.rl_baseline_method == "master":
                         flat_gen_r += master_r
+                    elif use_greed_baseline:
+                        flat_gen_r += [r for conv in greed_gen_r for r in conv]
                     mean_gen_r = np.mean(flat_gen_r)
                     std_gen_r = np.std(flat_gen_r)
                 if std_gen_r == 0:
@@ -712,7 +755,7 @@ class InterviewerAgent(TorchGeneratorAgent):
                 rewards = []
                 reward_tracker[r_name] = []
                 for step in range(len(master_r)):
-                    diverged_lineages = [(l.dialogues, gen_r[i], log_probs[i])
+                    diverged_lineages = [(l.dialogues, gen_r[i], log_probs[i], i)
                                         for i, l in enumerate(self.diverged_dialogues.lineages)
                                         if log_probs[i]['log_probs'] and l.gen_start_index == step]
                     if not diverged_lineages:
@@ -723,12 +766,18 @@ class InterviewerAgent(TorchGeneratorAgent):
                     num_generated_turns = len(dl_logprobs[-1])
                     dl_rewards = np.array([dl[1] for dl in diverged_lineages])
                     master_rewards = np.array(master_r[turns_count - num_generated_turns:turns_count])
+                    if use_greed_baseline:
+                        gd_rewards = np.array([greed_gen_r[dl[3]] for dl in diverged_lineages])
                     if required_normalise:
                         dl_rewards = (dl_rewards - mean_gen_r) / std_gen_r
                         master_rewards = (master_rewards - mean_gen_r) / std_gen_r
+                        if use_greed_baseline:
+                            gd_rewards = (gd_rewards - mean_gen_r) / std_gen_r
                     #use master reward as baseline
-                    if self.use_master_baseline:
+                    if self.rl_baseline_method == "master":
                         _reward = torch.tensor(dl_rewards - master_rewards)
+                    elif use_greed_baseline:
+                        _reward = torch.tensor(dl_rewards - gd_rewards)
                     else:
                         _reward = torch.tensor(dl_rewards)
                     # relative_reward = torch.tensor(dl_rewards)
@@ -742,7 +791,7 @@ class InterviewerAgent(TorchGeneratorAgent):
                 total_reward.append(reward*weight)
                 self.record_local_metric(r_name + '_mean', AverageMetric.many([float(mean_raw_gen_r)], [1]))
         if total_reward:
-            reinforcement_loss = torch.stack(total_reward).sum() * 1
+            reinforcement_loss = torch.stack(total_reward).sum()
             self.record_local_metric('reward_loss', AverageMetric.many([float(reinforcement_loss.detach().cpu())], [1]))
         if self.reinforcement_lambda != 1.0:
             total_loss = self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
@@ -754,7 +803,6 @@ class InterviewerAgent(TorchGeneratorAgent):
         except Exception as e:
             logging.debug(e)
         self.record_local_metric('total_loss', AverageMetric.many([float(total_loss.detach().cpu())], [1]))
-
 
 
     def eval_step(self, batch):
@@ -789,7 +837,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         preds = None
         maxlen = self.question_truncate or 30
         preds, scores = self.predict(div_batch, latest_turn_only=True)
-        # preds, s_preds, scores = self.sample(div_batch, latest_turn_only=True)
+        # s_preds, s_preds, s_scores = self.sample(div_batch, latest_turn_only=True)
         text = [" ".join(seq) for seq in preds]
         retval = Output(text[:1], log_probs=scores[:1], episode_end=[batch.episode_end], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, scores[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
         return retval
@@ -863,10 +911,11 @@ class InterviewerAgent(TorchGeneratorAgent):
                 else:
                     reward_step_tracker[r_name].append(_rewards.mean(0))
                     reward_step_d_tracker[r_name].append(d_reward.mean(0))
-
-            avg_diff = np.mean([r for conv in reward_step_d_tracker[r_name] for r in conv])
+            if reward_step_d_tracker[r_name]:
+                avg_diff = np.mean([r for conv in reward_step_d_tracker[r_name] for r in conv])
+                self.record_local_metric(r_name + '_avg_diff', AverageMetric.many([float(avg_diff)], [1]))
             self.record_local_metric(r_name+'_mean', AverageMetric.many([float(mean_gen_r)], [1]))
-            self.record_local_metric(r_name+'_avg_diff', AverageMetric.many([float(avg_diff)], [1]))
+
         if self.observation['is_last_episode']:
             self.save_eva_data()
 
@@ -940,7 +989,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         return {'src': batch['src'], 'src_mask': src_mask, 'turn_ids': batch['turn_ids'],
                 'tgt_in': batch['tgt_in'], 'bg': batch['bg'], 'bg_mask': bg_mask, 'tgt_out': batch['tgt_out']}
 
-    def predict(self, batch, beam_size=1, return_pair_level=False, latest_turn_only=False):
+    def predict(self, batch, beam_size=1, return_pair_level=False, latest_turn_only=False, no_grad=False):
         excluded_turn_indx = []
         inputs = trainer.unpack_batch(batch, self.use_cuda)
         src, tgt_in, tgt_out, turn_ids = \
@@ -950,7 +999,12 @@ class InterviewerAgent(TorchGeneratorAgent):
         bg_mask = bg.eq(constants.PAD_ID) if bg is not None else None
         batch_size = src.size(0)
         turn_size = src.size(1)
-        preds, log_probs = self.model.sq2sq_model.predict(src, src_mask, turn_ids, beam_size=beam_size, bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level)
+        if no_grad:
+            with torch.no_grad():
+                preds, log_probs = self.model.sq2sq_model.predict(src, src_mask, turn_ids, beam_size=beam_size, bg=bg,
+                                                                  bg_mask=bg_mask, return_pair_level=return_pair_level)
+        else:
+            preds, log_probs = self.model.sq2sq_model.predict(src, src_mask, turn_ids, beam_size=beam_size, bg=bg, bg_mask=bg_mask, return_pair_level=return_pair_level)
         if latest_turn_only:
             excluded_turn_indx = [i for i in range(len(preds)) if (i + 1) % turn_size != 0]
         pred_seqs = [[self.dict.ind2tok[id_] for id_ in ids] for i,  ids in enumerate(preds) if i not in excluded_turn_indx]
@@ -958,7 +1012,9 @@ class InterviewerAgent(TorchGeneratorAgent):
         pred_seqs = util.prune_decoded_seqs(pred_seqs)
         return pred_seqs, log_probs
 
-    def sample(self, batch, return_pair_level=False, latest_turn_only=True):
+    def sample(self, batch, return_pair_level=False, latest_turn_only=True,  train=True):
+        if train:
+            self.opt['topp'] = 1.0
         excluded_turn_indx = []
         inputs = trainer.unpack_batch(batch, self.use_cuda)
         src, tgt_in, tgt_out, turn_ids = \
@@ -974,6 +1030,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         preds, nll = preds
         pred_seqs = [[self.dict.ind2tok[id_] for id_ in ids] for i,  ids in enumerate(preds)]
         pred_seqs = util.prune_decoded_seqs(pred_seqs)
+        nll *= -1
         return pred_seqs, preds, nll
 
     def caching_eva(self, data, column_name, expecting_len=0):
@@ -984,7 +1041,7 @@ class InterviewerAgent(TorchGeneratorAgent):
 
     def save_eva_data(self):
         if self.opt.get('report_filename', None) and self.cache_eva_data:
-            f_name = self.opt['report_filenam'] + "_data.csv"
+            f_name = self.opt['report_filename'] + "_data.csv"
             pd.DataFrame(self.eva_cache).to_csv(f_name)
 
 

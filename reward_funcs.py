@@ -641,7 +641,7 @@ REWARD_MAP = {'reward_question': QuestionTokensScorer, 'reward_you': YouScorer,
               'reward_bot_response_length': OutputLengthScorer,
               'reward_simple_coverage': SimpleCoverageScorer,
               'reward_linguistic_acceptability': LinguisticAcceptabilityScorer,
-              'reward_weighted_coverage':WeightedCoverageScorer,
+              'reward_weighted_coverage': WeightedCoverageScorer,
               'reward_self_bleu': SelfBleuScorer,
               'reward_non_empty': NonEmptyScorer,
               'reward_specificity': TeacherSpecificityScorer}
