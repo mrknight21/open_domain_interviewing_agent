@@ -1,6 +1,7 @@
 import os
 import copy
 from parlai_internal.agents.interviewee.interviewee import IntervieweeAgent
+from parlai_internal.utilities.dialogue_history import DialogueTurn
 from parlai.core.teachers import ParlAIDialogTeacher
 from parlai.utils.misc import warn_once
 from parlai_internal.utilities.flow_lstm_util import util
@@ -91,6 +92,7 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         self.query_truncate = opt['query_maximum_length']
         self.context_truncate = opt['context_maximum_length']
         self.history_truncate = opt['history_maximum_length']
+        self.self_critic = opt['rl_baseline_method']
         self.history = self.build_history()
         self.rl_mode = opt['reinforcement_learning']
         self.exploration_steps = opt['exploration_steps']
@@ -127,25 +129,29 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         action['model_answers'] = []
         histories_dialogues = []
         model_answers = []
+        g_model_answers = []
         if len(self.history.dialogues) > 0:
             histories_dialogues.append(self.history.dialogues)
         if self.diverged_dialogues and len(self.diverged_dialogues.lineages) > 0:
             history_diverged_dialogues = self.diverged_dialogues.get_dialogues(active_only=True)
             histories_dialogues.extend(history_diverged_dialogues)
         if histories_dialogues:
-            try:
-                model_answers = self.get_model_answer(histories_dialogues, action)
-            except Exception as e:
-                pass
+            model_answers = self.get_model_answer(histories_dialogues, action)
+            if self.self_critic and self.check_greedy_questions(histories_dialogues):
+                g_model_answers = self.get_model_answer(histories_dialogues, action, use_greedy_question=True)
         if model_answers:
             action['model_answers'] = model_answers
+        if g_model_answers:
+            action['g_model_answers'] = g_model_answers
         if action['episode_done'] and model_answers:
-            rewards = self.get_reward(model_answers, action)
+            rewards = self.get_reward(model_answers, action, greedy_answers=g_model_answers)
             action['rewards'] = rewards
         return action
 
-    def get_reward(self, model_answers, action):
+    def get_reward(self, model_answers, action, greedy_answers=None):
         histories_dialogues = [self.history.dialogues] + self.diverged_dialogues.get_dialogues()
+        greedy_conversation = None
+        use_greedy = self.self_critic and greedy_answers
         ans_count = len(model_answers)
         for i, m_ans in enumerate(model_answers):
             # Reserve for the longest lineage when doing validaiton
@@ -158,16 +164,26 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
             histories_dialogues[i][-1].answer = m_ans['text']
             histories_dialogues[i][-1].cache = self.history.get_cache(m_ans)
             histories_dialogues[i][-1].reward = m_ans['reward_items']
-        rewards = self.compute_rewards(histories_dialogues, last_action=action)
+            greedy_output = None
+            if use_greedy:
+                greedy_output = {'answer': greedy_answers[i]['text'], 'cache': self.history.get_cache(greedy_answers[i]), 'reward': greedy_answers[i]['reward_items']}
+            histories_dialogues[i][-1].update(greedy_output=greedy_output)
+        if use_greedy:
+            greedy_conversation = self.get_greedy_conversation(histories_dialogues)
+        rewards = self.compute_rewards(histories_dialogues, last_action=action, greedy_conversation=greedy_conversation)
         return rewards
 
-    def compute_rewards(self, conversations, last_action):
+    def compute_rewards(self, conversations, last_action, greedy_conversation=None):
         rewards = {}
         for scorer in self.reward_scorer:
-            rewards[scorer.name] = {"master": None, "diverged_rewards": None,
+            rewards[scorer.name] = {"master": None, "diverged_rewards": None, "greedy_rewards": None,
                                     'global': scorer.global_reward, 'required_normalise':scorer.required_normalise}
             master_rewards, diverged_rewards = scorer.reward(conversations, self.history, last_action=last_action,
                                                             agent_dictionary=self.dict)
+            if self.self_critic and greedy_conversation:
+                _, greedy_rewards = scorer.reward(greedy_conversation, self.history, last_action=last_action,
+                                                                 agent_dictionary=self.dict)
+                rewards[scorer.name]["greedy_rewards"] = greedy_rewards
             rewards[scorer.name]["master"] = master_rewards
             rewards[scorer.name]["diverged_rewards"] = diverged_rewards
         return rewards
@@ -180,13 +196,16 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         return master
 
 
-    def get_model_answer(self, histories_dialogues, action):
+    def get_model_answer(self, histories_dialogues, action, use_greedy_question=False):
         retvals = []
         original_answer = action['text']
         original_question = action['single_label_text']
         for dialogues in histories_dialogues:
             obs = copy.copy(action)
-            obs['text'] = dialogues[-1].question
+            if use_greedy_question and dialogues[-1].greedy_question:
+                obs['text'] = dialogues[-1].greedy_question
+            else:
+                obs['text'] = dialogues[-1].question
             obs['single_label_text'] = original_answer
             tokenized_data = self.tokenize_from_history(obs, dialogues)
             vectorized_data = util.map_data(tokenized_data, self.dict)
@@ -225,3 +244,20 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         if 'diverged_dialogues' in observation:
             self.diverged_dialogues = observation['diverged_dialogues']
         return observation
+
+    def check_greedy_questions(self, histories_dialogues):
+        return any([t.greedy_question for dialogue in histories_dialogues for t in dialogue])
+
+    def get_greedy_conversation(self, conversations):
+        greedy_conversation = []
+        for conv in conversations:
+            greedy_conversation.append([])
+            for d in conv:
+                if d.greedy_question:
+                    new_d = DialogueTurn(question_text=d.greedy_question, answer_text=d.greedy_answer, reward=d.greedy_reward, cache=d.greedy_cache)
+                    new_d.generated = True
+                    new_d.complete = True
+                    greedy_conversation[-1].append(new_d)
+                else:
+                    greedy_conversation[-1].append(d)
+        return greedy_conversation
