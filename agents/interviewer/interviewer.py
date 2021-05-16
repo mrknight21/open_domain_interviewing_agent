@@ -51,6 +51,7 @@ class InterviewerHistory(DialogueHistory):
                 self.section_title = obs['section_title']
         self.temp_history = temp_history
 
+
 class Sq2SqQuestionGenerationModel(TorchGeneratorModel):
 
     def __init__(self, opt, dict):
@@ -170,7 +171,38 @@ class Sq2SqQuestionGenerationModel(TorchGeneratorModel):
         return log_probs[-1:, :, :], preds, {'h_in':h_in, 'src_mask': src_mask, 'hn': hn, 'cn': cn, 'h_bg': h_bg}
 
 
+class HierachialSq2SqQuestionGenerationModel(Sq2SqQuestionGenerationModel):
 
+    def load_question_generation_model(self, opt, dict):
+        if opt.get('init_finetune', False):
+            filename = os.path.join(opt['datapath'], constants.FINE_TUNE_FILE)
+        else:
+            filename = os.path.join(opt['datapath'], constants.BASE_MODEL_FILE)
+        print(f"Loading model from '{filename}'...")
+        checkpoint = torch.load(filename, lambda storage, loc: storage)
+        args = checkpoint['config']
+        if dict.vocab is not None:
+            args['vocab'] = dict.vocab
+        model = Seq2SeqModel(args, use_cuda=not opt['no_cuda'])
+        model.load_state_dict(checkpoint['model'])
+        return model
+
+
+    def forward(self, xs, ys=None, prev_enc=None, maxlen=None, bsz=None):
+        src = xs['src']
+        src_mask = xs['src_mask']
+        turn_ids = xs ['turn_ids']
+        tgt_in = xs['tgt_in']
+        bg = xs.get('bg', None)
+        bg_mask = xs.get('bg_mask', None)
+        # prepare for encoder/decoder
+        B, T, L = tgt_in.size()
+        tgt_in = tgt_in.view(B*T, L)
+        dec_inputs = self.sq2sq_model.emb_drop(self.sq2sq_model.embedding(tgt_in))
+        h_in, src_mask, (hn, cn), h_bg = self.sq2sq_model.encode_sources(src, src_mask, bg, bg_mask, turn_ids=turn_ids)
+        log_probs, _, dec_attn, _ = self.sq2sq_model.decode(dec_inputs, hn, cn, h_in, src_mask, turn_ids=turn_ids, h_bg=self.sq2sq_model.drop(h_bg))
+        _, preds = log_probs.max(dim=2)
+        return log_probs[-1:, :, :], preds, {'h_in':h_in, 'src_mask': src_mask, 'hn': hn, 'cn': cn, 'h_bg': h_bg}
 class InterviewerAgent(TorchGeneratorAgent):
     """
     Interviewer agent.
@@ -264,6 +296,12 @@ class InterviewerAgent(TorchGeneratorAgent):
             default='no_baseline',
             help='choose the baseline strategy',
         )
+        parser.add_argument(
+            '--hierachial-rl',
+            type='bool',
+            default=False,
+            help='use hierachial multi-source reinforcement learning',
+        )
 
     def __init__(self, opt: Opt, shared=None):
         self.rl_mode = opt['reinforcement_learning']
@@ -277,6 +315,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         self.all_rewards_global = opt['all_rewards_global']
         self.add_master_question_answer_lineage = opt['add_master_question_answer_lineage']
         self.cache_eva_data = opt['cache_eva_data']
+        self.hierachial_rl = opt['hierachial_rl']
         self.eva_cache = {}
         super().__init__(opt, shared)
 
@@ -394,7 +433,10 @@ class InterviewerAgent(TorchGeneratorAgent):
         """
         Construct the model.
         """
-        return Sq2SqQuestionGenerationModel(self.opt, self.dict)
+        if self.hierachial_rl:
+            return Sq2SqQuestionGenerationModel(self.opt, self.dict)
+        else:
+            return Sq2SqQuestionGenerationModel(self.opt, self.dict)
 
     def build_criterion(self):
         """
@@ -669,11 +711,11 @@ class InterviewerAgent(TorchGeneratorAgent):
                     gen_reward_index.append([])
                 else:
                     gen_reward_index.append(list(range(content['dialogue_length'])[-len(content['ques_len']):]))
-
             if self.all_rewards_global:
                 for r_name, content in self.history.rewards.items():
                     global_rewards[r_name] = content
                     global_rewards[r_name]['global'] = True
+                    global_rewards[r_name]['required_normalise'] = True
             else:
                 global_rewards = {name: content for name, content in self.history.rewards.items() if content['global']}
                 local_rewards = {name: content for name, content in self.history.rewards.items() if not content['global']}
@@ -748,7 +790,7 @@ class InterviewerAgent(TorchGeneratorAgent):
                         flat_gen_r += [r for conv in greed_gen_r for r in conv]
                     mean_gen_r = np.mean(flat_gen_r)
                     std_gen_r = np.std(flat_gen_r)
-                if std_gen_r == 0:
+                if required_normalise and std_gen_r == 0:
                     continue
                 flat_raw_gen_r = [r for conv in raw_gen_r for r in conv]
                 mean_raw_gen_r = np.mean(flat_raw_gen_r)
