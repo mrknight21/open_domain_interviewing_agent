@@ -170,39 +170,6 @@ class Sq2SqQuestionGenerationModel(TorchGeneratorModel):
         _, preds = log_probs.max(dim=2)
         return log_probs[-1:, :, :], preds, {'h_in':h_in, 'src_mask': src_mask, 'hn': hn, 'cn': cn, 'h_bg': h_bg}
 
-
-class HierachialSq2SqQuestionGenerationModel(Sq2SqQuestionGenerationModel):
-
-    def load_question_generation_model(self, opt, dict):
-        if opt.get('init_finetune', False):
-            filename = os.path.join(opt['datapath'], constants.FINE_TUNE_FILE)
-        else:
-            filename = os.path.join(opt['datapath'], constants.BASE_MODEL_FILE)
-        print(f"Loading model from '{filename}'...")
-        checkpoint = torch.load(filename, lambda storage, loc: storage)
-        args = checkpoint['config']
-        if dict.vocab is not None:
-            args['vocab'] = dict.vocab
-        model = Seq2SeqModel(args, use_cuda=not opt['no_cuda'])
-        model.load_state_dict(checkpoint['model'])
-        return model
-
-
-    def forward(self, xs, ys=None, prev_enc=None, maxlen=None, bsz=None):
-        src = xs['src']
-        src_mask = xs['src_mask']
-        turn_ids = xs ['turn_ids']
-        tgt_in = xs['tgt_in']
-        bg = xs.get('bg', None)
-        bg_mask = xs.get('bg_mask', None)
-        # prepare for encoder/decoder
-        B, T, L = tgt_in.size()
-        tgt_in = tgt_in.view(B*T, L)
-        dec_inputs = self.sq2sq_model.emb_drop(self.sq2sq_model.embedding(tgt_in))
-        h_in, src_mask, (hn, cn), h_bg = self.sq2sq_model.encode_sources(src, src_mask, bg, bg_mask, turn_ids=turn_ids)
-        log_probs, _, dec_attn, _ = self.sq2sq_model.decode(dec_inputs, hn, cn, h_in, src_mask, turn_ids=turn_ids, h_bg=self.sq2sq_model.drop(h_bg))
-        _, preds = log_probs.max(dim=2)
-        return log_probs[-1:, :, :], preds, {'h_in':h_in, 'src_mask': src_mask, 'hn': hn, 'cn': cn, 'h_bg': h_bg}
 class InterviewerAgent(TorchGeneratorAgent):
     """
     Interviewer agent.
@@ -296,12 +263,6 @@ class InterviewerAgent(TorchGeneratorAgent):
             default='no_baseline',
             help='choose the baseline strategy',
         )
-        parser.add_argument(
-            '--hierachial-rl',
-            type='bool',
-            default=False,
-            help='use hierachial multi-source reinforcement learning',
-        )
 
     def __init__(self, opt: Opt, shared=None):
         self.rl_mode = opt['reinforcement_learning']
@@ -315,7 +276,6 @@ class InterviewerAgent(TorchGeneratorAgent):
         self.all_rewards_global = opt['all_rewards_global']
         self.add_master_question_answer_lineage = opt['add_master_question_answer_lineage']
         self.cache_eva_data = opt['cache_eva_data']
-        self.hierachial_rl = opt['hierachial_rl']
         self.eva_cache = {}
         super().__init__(opt, shared)
 
@@ -433,10 +393,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         """
         Construct the model.
         """
-        if self.hierachial_rl:
-            return Sq2SqQuestionGenerationModel(self.opt, self.dict)
-        else:
-            return Sq2SqQuestionGenerationModel(self.opt, self.dict)
+        return Sq2SqQuestionGenerationModel(self.opt, self.dict)
 
     def build_criterion(self):
         """
@@ -449,6 +406,8 @@ class InterviewerAgent(TorchGeneratorAgent):
         return torch.nn.NLLLoss(ignore_index=constants.PAD_ID, reduction='none')
 
     def observe(self, observation):
+        if observation['turn_id'] == '0':
+            self.diverged_dialogues.reset()
         if self.rl_mode and len(self.diverged_dialogues.lineages) > 0:
             self.diverged_dialogues_update(observation)
         super().observe(observation)
@@ -872,6 +831,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         if batch.label_vec is not None:
             # calculate loss on targets with teacher forcing
             loss, model_output = self.compute_loss(batch, return_output=True)
+            self.history.dialogues_nll_loss.append(loss)
             if self.output_token_losses:
                 token_losses = self._construct_token_losses(
                     batch.label_vec, model_output
@@ -916,6 +876,8 @@ class InterviewerAgent(TorchGeneratorAgent):
         for r_name, r in self.history.rewards.items():
             master_raw_r = r['master']
             diverged_raw_r = r['diverged_rewards']
+            if not self.add_master_question_answer_lineage and not self.single_full_length_generation:
+                diverged_raw_r = diverged_raw_r[1:]
             if self.cache_eva_data:
                 self.caching_eva(master_raw_r, r_name+"_master", expecting_len)
                 self.caching_eva(diverged_raw_r[1], r_name + "_gen", expecting_len)
@@ -958,7 +920,7 @@ class InterviewerAgent(TorchGeneratorAgent):
                 self.record_local_metric(r_name + '_avg_diff', AverageMetric.many([float(avg_diff)], [1]))
             self.record_local_metric(r_name+'_mean', AverageMetric.many([float(mean_gen_r)], [1]))
 
-        if self.observation['is_last_episode']:
+        if self.observation['is_last_episode'] and self.cache_eva_data:
             self.save_eva_data()
 
 

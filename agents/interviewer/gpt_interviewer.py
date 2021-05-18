@@ -1,7 +1,7 @@
 from parlai_internal.agents.interviewer.interviewer import InterviewerAgent
 from parlai_internal.utilities.flow_lstm_util import constants
-from parlai.agents.hugging_face.gpt2 import Gpt2DictionaryAgent, GPT2Decoder, HFGPT2Model
-from parlai.core.torch_agent import Optional, Batch, Output
+from parlai.agents.hugging_face.gpt2 import Gpt2DictionaryAgent,  HFGPT2Model
+from parlai.core.torch_agent import Output
 import parlai.utils.logging as logging
 from parlai.core.opt import Opt
 from parlai.core.params import ParlaiParser
