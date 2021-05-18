@@ -864,6 +864,8 @@ class InterviewerAgent(TorchGeneratorAgent):
             self.caching_eva([self.history.title] + [""]*(expecting_len-1), "title", expecting_len)
             self.caching_eva([self.history.context] + [""] * (expecting_len - 1), "context", expecting_len)
             self.caching_eva([self.history.section_title] + [""] * (expecting_len - 1), "section_title", expecting_len)
+            if self.history.dialogues_nll_loss:
+                self.caching_eva(self.history.dialogues_nll_loss, "question_gen_length", expecting_len)
         for content in log_probs:
             if len(content['ques_len']) == 0:
                 gen_reward_index.append([])
