@@ -218,7 +218,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         parser.add_argument(
             '--reinforcement-lambda',
             type=float,
-            default=0.9,
+            default=0.98,
             help='the percentage of the reinforcement account for total loss',
         )
         parser.add_argument(
@@ -343,7 +343,7 @@ class InterviewerAgent(TorchGeneratorAgent):
                 # freeze lineage that reach the exploration limits
                 if len(list(filter(lambda x: x.complete and x.generated, lineage.dialogues))) >= self.exploration_steps:
                     # allow the longest gen lineage to grow for later evaluation
-                    if not self.is_training and lineage.gen_start_index == 0:
+                    if lineage.gen_start_index == 0 and self.single_full_length_generation:
                         continue
                     else:
                         lineage.freeze = True
@@ -355,6 +355,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         :param model_outputs: message object  with 'text', 'log_probs', and 'diverged_outputs'
         :return: Update the diverged_dialogues object
         """
+        lineage_offset = 0
         if not self.single_full_length_generation or len(self.diverged_dialogues.lineages) == 0:
             greedy_output = None
             if self_message.get("greedy_master_output", None):
@@ -363,6 +364,7 @@ class InterviewerAgent(TorchGeneratorAgent):
                                                 log_prob=self_message.get("log_probs", None),
                                                 ques_len=self_message.get("ques_len", None),
                                                 greedy_output=greedy_output)
+            lineage_offset += 1
         model_outputs = self_message['diverged_outputs']
         greedy_questions = self_message.get('greedy_output', None)
         cnt = len(model_outputs)
@@ -370,11 +372,11 @@ class InterviewerAgent(TorchGeneratorAgent):
             greedy_output = None
             if greedy_questions:
                 greedy_output = {"question": greedy_questions[i]}
-            if not self.is_training and i+1==cnt:
+            if self.single_full_length_generation and i+1==cnt:
                 self.diverged_dialogues.lineages[-1]._update_dialogues(text, log_prob=logprob, ques_len=ques_len,
                                                                        greedy_output=greedy_output)
                 continue
-            lineage_index = i + 1
+            lineage_index = i + lineage_offset
             self.diverged_dialogues.lineages[lineage_index]._update_dialogues(text, log_prob=logprob, ques_len=ques_len,
                                                                               greedy_output=greedy_output)
 
@@ -792,7 +794,7 @@ class InterviewerAgent(TorchGeneratorAgent):
                 total_reward.append(reward*weight)
                 self.record_local_metric(r_name + '_mean', AverageMetric.many([float(mean_raw_gen_r)], [1]))
         if total_reward:
-            reinforcement_loss = torch.stack(total_reward).sum()
+            reinforcement_loss = torch.stack(total_reward).sum() * -1
             self.record_local_metric('reward_loss', AverageMetric.many([float(reinforcement_loss.detach().cpu())], [1]))
         if self.reinforcement_lambda != 1.0:
             total_loss = self.reinforcement_lambda * reinforcement_loss + (1-self.reinforcement_lambda)*torch.stack(self.history.dialogues_nll_loss).mean()
