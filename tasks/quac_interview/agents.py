@@ -5,18 +5,12 @@ from parlai_internal.utilities.dialogue_history import DialogueTurn
 from parlai.core.teachers import ParlAIDialogTeacher
 from parlai.utils.misc import warn_once
 from parlai_internal.utilities.flow_lstm_util import util
-from parlai_internal import reward_funcs
+from parlai_internal.reward_funcs import REWARD_MAP, DEFAULT_REWARD_LIST, DEFAULT_EVA_LIST
 from .build import build
 import torch
 
 NO_ANSWER_REPLY = "CANNOTANSWER"
-SUPPORTED_REWARDS = {'reward_question', 'reward_you',
-                     'reward_conversation_repetition', 'reward_utterance_repetition', 'reward_self_bleu',
-                     'reward_bot_response_length', 'reward_simple_coverage', 'reward_linguistic_acceptability', 'reward_weighted_coverage'}
 
-DEFAULT_REWARD_LIST = {'reward_specificity', 'reward_weighted_coverage', 'reward_linguistic_acceptability', 'reward_self_bleu'}
-
-DEFAULT_EVA_LIST = {'reward_specificity', 'reward_weighted_coverage', 'reward_linguistic_acceptability', 'reward_self_bleu', 'reward_non_empty'}
 
 def _path(opt):
     # Build the data if it doesn't exist.
@@ -121,10 +115,11 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
         if not self.rl_mode or not self.rewards_list:
             return
         for i, r in enumerate(self.rewards_list):
-            scorer = reward_funcs.REWARD_MAP[r](r, use_cuda=self.use_cuda)
+            scorer = REWARD_MAP[r](r, use_cuda=self.use_cuda)
             self.reward_scorer.append(scorer)
 
     def get(self, episode_idx, entry_idx=None):
+        episode_idx = 5250
         action = super().get(episode_idx, entry_idx)
         action['model_answers'] = []
         histories_dialogues = []

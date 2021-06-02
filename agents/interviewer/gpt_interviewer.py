@@ -231,8 +231,10 @@ class GptInterviewerAgent(InterviewerAgent):
                 )
         preds = None
         maxlen = self.question_truncate or 30
-        preds, text, scores = self.predict(div_batch, latest_turn_only=True)
-        # preds, text, scores = self.sample(div_batch, latest_turn_only=True)
+        if self.eva_sample:
+            preds, text, scores = self.sample(div_batch, latest_turn_only=True)
+        else:
+            preds, text, scores = self.predict(div_batch, latest_turn_only=True)
         retval = Output(text[:1], log_probs=scores[:1], episode_end=[batch.episode_end], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, scores[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
         return retval
 

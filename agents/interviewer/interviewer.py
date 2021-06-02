@@ -15,7 +15,7 @@ from parlai_internal.utilities.flow_lstm_util.models.seq2seq import Seq2SeqModel
 from parlai_internal.utilities.flow_lstm_util.models import trainer
 from parlai_internal.utilities.flow_lstm_util import constants, util
 from parlai_internal.utilities.dialogue_history import DialogueHistory, DialogueLineages
-from parlai_internal.reward_funcs import forward_average_discount, normalize_rewards, normalizeZ
+from parlai_internal.reward_funcs import forward_average_discount, normalize_rewards, normalizeZ, DEFAULT_REWARD_LIST
 from parlai.core.params import ParlaiParser
 from parlai.core.opt import Opt
 
@@ -258,10 +258,22 @@ class InterviewerAgent(TorchGeneratorAgent):
             help='cache and save the dialogue text and reward of the evaluation',
         )
         parser.add_argument(
+            '--eva-sample',
+            type='bool',
+            default=False,
+            help='cache and save the dialogue text and reward of the evaluation',
+        )
+        parser.add_argument(
             '--rl-baseline-method',
             choices={'no_baseline', 'master', 'self_critic'},
             default='no_baseline',
             help='choose the baseline strategy',
+        )
+        parser.add_argument(
+            '--rewards-list',
+            nargs='+',
+            default=DEFAULT_REWARD_LIST,
+            help='the list of rewards functions',
         )
 
     def __init__(self, opt: Opt, shared=None):
@@ -276,6 +288,7 @@ class InterviewerAgent(TorchGeneratorAgent):
         self.all_rewards_global = opt['all_rewards_global']
         self.add_master_question_answer_lineage = opt['add_master_question_answer_lineage']
         self.cache_eva_data = opt['cache_eva_data']
+        self.eva_sample = opt['eva_sample']
         self.eva_cache = {}
         super().__init__(opt, shared)
 
@@ -711,9 +724,12 @@ class InterviewerAgent(TorchGeneratorAgent):
                 diverged_raw_r = r['diverged_rewards']
                 greedy_raw_r = r.get('greedy_rewards', None)
                 if not self.add_master_question_answer_lineage:
-                    diverged_raw_r = diverged_raw_r[1:]
-                    if greedy_raw_r:
-                        greedy_raw_r = greedy_raw_r[1:]
+                    try:
+                        diverged_raw_r = diverged_raw_r[1:]
+                        if greedy_raw_r:
+                            greedy_raw_r = greedy_raw_r[1:]
+                    except TypeError:
+                        pass
                 raw_greed_gen_r = []
                 required_normalise = r['required_normalise']
                 raw_gen_r = [[r for j, r in enumerate(rs) if j in gen_reward_index[i]] for i, rs in enumerate(diverged_raw_r)]
@@ -840,9 +856,13 @@ class InterviewerAgent(TorchGeneratorAgent):
                 )
         preds = None
         maxlen = self.question_truncate or 30
-        preds, scores = self.predict(div_batch, latest_turn_only=True)
-        # s_preds, s_preds, s_scores = self.sample(div_batch, latest_turn_only=True)
-        text = [" ".join(seq) for seq in preds]
+
+        if self.eva_sample:
+            text, preds, scores = self.sample(div_batch, latest_turn_only=True)
+            text = [" ".join(seq) for seq in text]
+        else:
+            preds, scores = self.predict(div_batch, latest_turn_only=True)
+            text = [" ".join(seq) for seq in preds]
         retval = Output(text[:1], log_probs=scores[:1], episode_end=[batch.episode_end], ques_len=[len(preds[0])-1],  diverged_outputs=[[(t, scores[i], len(preds[i])-1) for i, t in enumerate(text[1:])]])
         return retval
 
