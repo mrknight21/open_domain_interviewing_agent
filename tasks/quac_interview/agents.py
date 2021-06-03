@@ -119,7 +119,6 @@ class ReinforcementLearningTeacherAgent(DefaultTeacher, IntervieweeAgent):
             self.reward_scorer.append(scorer)
 
     def get(self, episode_idx, entry_idx=None):
-        episode_idx = 5250
         action = super().get(episode_idx, entry_idx)
         action['model_answers'] = []
         histories_dialogues = []
