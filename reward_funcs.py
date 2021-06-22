@@ -27,9 +27,9 @@ SUPPORTED_REWARDS = {'reward_question', 'reward_you',
                      'reward_conversation_repetition', 'reward_utterance_repetition', 'reward_self_bleu',
                      'reward_bot_response_length', 'reward_simple_coverage', 'reward_linguistic_acceptability', 'reward_weighted_coverage'}
 
-DEFAULT_REWARD_LIST = {'reward_specificity', 'reward_weighted_coverage', 'reward_linguistic_acceptability', 'reward_self_bleu', 'reward_novelty'}
+DEFAULT_REWARD_LIST = {'reward_specificity', 'reward_weighted_coverage', 'reward_linguistic_acceptability', 'reward_self_bleu', 'reward_novelty', 'reward_novelty'}
 
-DEFAULT_EVA_LIST = {'reward_specificity', 'reward_weighted_coverage', 'reward_linguistic_acceptability', 'reward_self_bleu', 'reward_non_empty'}
+DEFAULT_EVA_LIST = {'reward_specificity', 'reward_weighted_coverage', 'reward_linguistic_acceptability', 'reward_self_bleu', 'reward_non_empty', 'reward_novelty'}
 
 
 def normalize_rewards(rewards):

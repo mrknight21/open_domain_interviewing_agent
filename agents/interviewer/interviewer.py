@@ -347,9 +347,6 @@ class InterviewerAgent(TorchGeneratorAgent):
                 self.diverged_dialogues.add_lineage(text, self.history, message=retval, reward=reward, greedy_output=greedy_output)
                 offset_adjust += 1
             elif i != 0:
-                if not self.is_training and i + 1 == cnt:
-                    self.diverged_dialogues.lineages[-1]._update_dialogues(text, cache=cache, reward=reward, greedy_output=greedy_output)
-                    continue
                 self.diverged_dialogues.lineages[i+offset_adjust]._update_dialogues(text, cache=cache, reward=reward, greedy_output=greedy_output)
         for lineage in self.diverged_dialogues.lineages:
             if not lineage.freeze:
@@ -885,7 +882,10 @@ class InterviewerAgent(TorchGeneratorAgent):
             self.caching_eva([int(self.observation['qas_id'][:self.observation['qas_id'].index("_")])]*expecting_len, "conv_id", expecting_len)
             self.caching_eva([self.history.title] + [""]*(expecting_len-1), "title", expecting_len)
             self.caching_eva([self.history.context] + [""] * (expecting_len - 1), "context", expecting_len)
-            self.caching_eva([self.history.section_title] + [""] * (expecting_len - 1), "section_title", expecting_len)
+            if self.history.background:
+                self.caching_eva([self.history.background] + [""] * (expecting_len - 1), "background", expecting_len)
+            if self.history.section_title:
+                self.caching_eva([self.history.section_title] + [""] * (expecting_len - 1), "section_title", expecting_len)
             if self.history.dialogues_nll_loss:
                 self.caching_eva([float(nll.detach().cpu()) for nll in self.history.dialogues_nll_loss], "tf_nll_loss", expecting_len)
         for content in log_probs:
@@ -962,7 +962,10 @@ class InterviewerAgent(TorchGeneratorAgent):
         strings_to_tokenize.append(item['single_label_text'])
         strings_to_tokenize.append(item['text'])
         qas.append((item['single_label_text'], ""))
-        tokenized, offsets = self.dict.bulk_tokenize(strings_to_tokenize, return_offsets=True)
+        try:
+            tokenized, offsets = self.dict.bulk_tokenize(strings_to_tokenize, return_offsets=True)
+        except Exception as e:
+            pass
         retval = {'title': tokenized[0], 'section_title': tokenized[1], 'context': tokenized[2], 'background': tokenized[3], 'qas':[]}
         tokenized = tokenized[4:]
         parsed_idx = 0
